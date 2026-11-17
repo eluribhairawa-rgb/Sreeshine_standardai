@@ -8,7 +8,7 @@ import DocumentUploadDropzone from "../components/DocumentUploadDropzone";
 import { Alert, Badge, Button, Checkbox, ConfirmDialog, Input, Select, Table, TableCell, TableHead, TableRow, Tabs, TabsContent, TabsTrigger, Textarea } from "../components/ui";
 import { API_BASE, SUPPORTED_DOCUMENT_ACCEPT, SUPPORTED_DOCUMENT_EXTENSIONS } from "../lib/constants";
 import { apiFetch, reportError } from "../lib/api";
-import { calculateAgeFromDob, formatDate, formatDateTimeIST, getISTDateTimeKey, getTimestamp, stripUploadTimestampPrefix } from "../lib/format";
+import { calculateAgeFromDob, formatDate, formatDateTimeIST, getISTDateKey, getISTDateTimeKey, getTimestamp, stripUploadTimestampPrefix } from "../lib/format";
 import { printViaIframe } from "../lib/printViaIframe";
 import { exportPDF, downloadPDF, patientFilename } from "../lib/exportService";
 import { shareHtmlAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
@@ -252,6 +252,227 @@ export default function PatientsPage({
   const latestQueryRef = useRef("");
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Calendar date filter ──────────────────────────────────────────────────
+  const todayIST = (() => {
+    const now = new Date();
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(now);
+  })();
+  const [calendarDate, setCalendarDate] = useState<string>(todayIST);
+  const [calendarMonth, setCalendarMonth] = useState<{ year: number; month: number }>(() => {
+    const [y, m] = todayIST.split("-").map(Number);
+    return { year: y, month: m };
+  });
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarFilterActive, setCalendarFilterActive] = useState(false);
+  const calendarRef = useRef<HTMLDivElement>(null);
+
+  // Manual date input state (DD/MM/YYYY display format)
+  const toDisplayDate = (iso: string) => {
+    const [y, m, d] = iso.split("-");
+    return `${d}/${m}/${y}`;
+  };
+  const [dateInputValue, setDateInputValue] = useState(() => toDisplayDate(todayIST));
+  const [dateInputError, setDateInputError] = useState(false);
+
+  // Keep input text in sync when calendar date changes via grid click
+  const selectCalendarDate = (dateKey: string) => {
+    setCalendarDate(dateKey);
+    setDateInputValue(toDisplayDate(dateKey));
+    setDateInputError(false);
+    setCalendarFilterActive(true);
+    const [y, m] = dateKey.split("-").map(Number);
+    setCalendarMonth({ year: y, month: m });
+  };
+
+  // Handle manual typing – auto-insert slashes, validate on complete entry
+  const handleDateInputChange = (raw: string) => {
+    // Strip anything that isn't a digit or slash
+    let v = raw.replace(/[^\d/]/g, "");
+
+    // Auto-insert slashes at positions 2 and 5
+    if (v.length === 2 && !v.includes("/") && dateInputValue.length < raw.length) {
+      v = v + "/";
+    } else if (v.length === 5 && v.split("/").length === 2 && dateInputValue.length < raw.length) {
+      v = v + "/";
+    }
+
+    // Cap at 10 characters (DD/MM/YYYY)
+    if (v.length > 10) v = v.slice(0, 10);
+
+    setDateInputValue(v);
+
+    if (v.length === 10) {
+      // Validate and apply
+      const parts = v.split("/");
+      if (parts.length === 3) {
+        const [dd, mm, yyyy] = parts.map(Number);
+        const isValid =
+          !Number.isNaN(dd) && !Number.isNaN(mm) && !Number.isNaN(yyyy) &&
+          dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yyyy >= 1900 && yyyy <= 2100;
+        if (isValid) {
+          const dateKey = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+          // Confirm the date actually exists (e.g. not 31/02)
+          const test = new Date(yyyy, mm - 1, dd);
+          if (test.getFullYear() === yyyy && test.getMonth() + 1 === mm && test.getDate() === dd) {
+            setCalendarDate(dateKey);
+            setCalendarMonth({ year: yyyy, month: mm });
+            setDateInputError(false);
+            return;
+          }
+        }
+      }
+      setDateInputError(true);
+    } else {
+      setDateInputError(false);
+    }
+  };
+
+  const handleDateInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      // Try to apply even if not 10 chars yet — parse what we have
+      handleDateInputChange(dateInputValue);
+    }
+  };
+
+  // Close calendar on outside click
+  useEffect(() => {
+    if (!calendarOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (calendarRef.current && !calendarRef.current.contains(e.target as Node)) {
+        setCalendarOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [calendarOpen]);
+
+  // Build a "YYYY-MM-DD" key from a patient's created_at in IST
+  const getPatientDateKey = (p: Patient): string => getISTDateKey(p.created_at);
+
+  // Which dates in the current calendar month have at least one patient
+  const patientDateSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of patients) {
+      const key = getPatientDateKey(p);
+      if (key) set.add(key);
+    }
+    return set;
+  }, [patients]);
+
+  // Patients for the selected calendar date (from the full list)
+  const patientsForCalendarDate = useMemo(() => {
+    return patients.filter((p) => getPatientDateKey(p) === calendarDate);
+  }, [patients, calendarDate]);
+
+  // Calendar navigation helpers
+
+  const handleCalPrevMonth = () => {
+    setCalendarMonth(({ year, month }) => {
+      if (month === 1) return { year: year - 1, month: 12 };
+      return { year, month: month - 1 };
+    });
+  };
+  const handleCalNextMonth = () => {
+    setCalendarMonth(({ year, month }) => {
+      if (month === 12) return { year: year + 1, month: 1 };
+      return { year, month: month + 1 };
+    });
+  };
+
+  const calendarCells = useMemo(() => {
+    const { year, month } = calendarMonth;
+    const lead = new Date(year, month - 1, 1).getDay();
+    const total = Math.ceil((lead + new Date(year, month, 0).getDate()) / 7) * 7;
+    return Array.from({ length: total }, (_, i) => {
+      const d = new Date(year, month - 1, i - lead + 1);
+      const y = d.getFullYear();
+      const m = d.getMonth() + 1;
+      return {
+        key: `${y}-${String(m).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+        day: d.getDate(), month: m, year: y, inMonth: m === month,
+      };
+    });
+  }, [calendarMonth]);
+
+  const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+
+  // Print the patient list for the selected calendar date
+  const handlePrintDateList = () => {
+    const list = patientsForCalendarDate;
+    const [y, m, d] = calendarDate.split("-");
+    const displayDate = `${d}/${m}/${y}`;
+    const printDate = new Date().toLocaleDateString("en-GB");
+    const printTime = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+
+    const rows = list.map((p, i) => {
+      const name = [p.name, p.middle_name, p.last_name].filter(Boolean).join(" ") || "-";
+      const phone = p.phone || "-";
+      const age = p.age || "-";
+      const gender = p.gender || "-";
+      const uid = p.patient_id || "-";
+      const created = p.created_at ? formatDate(p.created_at) : "-";
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${uid}</td>
+        <td>${name.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</td>
+        <td>${age}</td>
+        <td>${gender}</td>
+        <td>${phone}</td>
+        <td>${created}</td>
+      </tr>`;
+    }).join("");
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Patient List – ${displayDate}</title>
+  <style>
+    @page { size: A4 portrait; margin: 15mm 10mm 20mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #000; }
+    h2 { font-size: 13pt; margin: 0 0 1mm; }
+    .sub { font-size: 8.5pt; color: #555; margin: 0 0 4mm; }
+    table { width: 100%; border-collapse: collapse; margin-top: 4mm; }
+    th { background: #f1f5f9; font-weight: 700; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.03em; padding: 2.5mm 2mm; border: 0.3mm solid #ccc; }
+    td { padding: 2mm 2mm; border: 0.3mm solid #ddd; vertical-align: top; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    .count { font-size: 8pt; color: #555; margin-top: 2mm; }
+    .no-patients { text-align: center; padding: 8mm; color: #888; font-size: 10pt; }
+  </style>
+</head>
+<body>
+  <h2>Patient List – ${displayDate}</h2>
+  <p class="sub">Registered on ${displayDate} &nbsp;|&nbsp; Total: ${list.length} patient${list.length === 1 ? "" : "s"}</p>
+  ${list.length === 0
+    ? `<p class="no-patients">No patients registered on ${displayDate}.</p>`
+    : `<table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>UHID</th>
+            <th>Patient Name</th>
+            <th>Age</th>
+            <th>Gender</th>
+            <th>Phone</th>
+            <th>Registered</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="count">Total patients: ${list.length}</p>`}
+</body>
+</html>`;
+    printViaIframe(html);
+  };
+
   const runSearch = async (term: string, status: "all" | "ip" | "op") => {
     const trimmed = term.trim();
     const requestKey = `${trimmed}|${status}`;
@@ -323,6 +544,7 @@ export default function PatientsPage({
     setActiveQuery("");
     setLoading(false);
     latestQueryRef.current = "";
+    setCalendarFilterActive(false);
   };
 
   const trimmedQuery = query.trim();
@@ -335,15 +557,20 @@ export default function PatientsPage({
   };
 
   const displayPatients = useMemo(() => {
-    if (!selectedPatient?.patient_id) return baseList;
+    let list = baseList;
+    // Apply calendar date filter if active
+    if (calendarFilterActive) {
+      list = patients.filter((p) => getPatientDateKey(p) === calendarDate);
+    }
+    if (!selectedPatient?.patient_id) return list;
     const selId = selectedPatient.patient_id.trim().toLowerCase();
-    const exists = baseList.some((p) => (p.patient_id || "").trim().toLowerCase() === selId);
+    const exists = list.some((p) => (p.patient_id || "").trim().toLowerCase() === selId);
     if (!exists) {
       const fromAll = patients.find((p) => (p.patient_id || "").trim().toLowerCase() === selId);
-      return [fromAll || selectedPatient, ...baseList];
+      return [fromAll || selectedPatient, ...list];
     }
-    return baseList;
-  }, [baseList, selectedPatient, patients]);
+    return list;
+  }, [baseList, selectedPatient, patients, calendarFilterActive, calendarDate]);
 
   useEffect(() => {
     if (!selectedPatient?.patient_id) return;
@@ -375,12 +602,111 @@ export default function PatientsPage({
   };
 
   return (
-    <section className="patient-page">
+    <section className="patient-page" style={{ position: "relative" }}>
+      {/* ── Calendar – top-right corner, outside the card, level with the page title ── */}
+      <div className="cal-corner-wrap" ref={calendarRef}>
+
+        {/* Trigger: native-style date input bar */}
+        <div
+          className={`cal-input-bar${calendarOpen ? " open" : ""}`}
+          onClick={() => setCalendarOpen((o) => !o)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setCalendarOpen((o) => !o); }}}
+          aria-expanded={calendarOpen}
+          aria-haspopup="true"
+          title="Select date to view & print patients"
+        >
+          {/* calendar icon left */}
+          <svg className="cal-input-icon-left" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          {/* date text */}
+          <span className="cal-input-text">
+            {(() => { const [y,m,d] = calendarDate.split("-"); return `${d}-${m}-${y}`; })()}
+          </span>
+          {patientsForCalendarDate.length > 0 && (
+            <span className="cal-input-badge">{patientsForCalendarDate.length}</span>
+          )}
+          {/* calendar icon right */}
+          <svg className="cal-input-icon-right" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+        </div>
+
+        {calendarOpen && (
+          <div className="cal-popover" role="dialog" aria-label="Patient calendar">
+
+            {/* Month/year header with up/down arrows */}
+            <div className="cal-nav">
+              <span className="cal-nav-label">
+                {MONTH_NAMES[calendarMonth.month - 1]}, {calendarMonth.year}
+                <span className="cal-nav-arrow-wrap">
+                  <button type="button" className="cal-nav-arrow-btn" onClick={handleCalPrevMonth} aria-label="Previous month">↑</button>
+                  <button type="button" className="cal-nav-arrow-btn" onClick={handleCalNextMonth} aria-label="Next month">↓</button>
+                </span>
+              </span>
+            </div>
+
+            {/* Day grid */}
+            <div className="cal-grid">
+              {["Su","Mo","Tu","We","Th","Fr","Sa"].map((d) => (
+                <div key={d} className="cal-day-header">{d}</div>
+              ))}
+              {calendarCells.map((cell) => {
+                const isSelected = cell.key === calendarDate;
+                const isToday = cell.key === todayIST;
+                const hasPatients = patientDateSet.has(cell.key);
+                return (
+                  <button
+                    key={cell.key}
+                    type="button"
+                    className={["cal-day", cell.inMonth ? "" : "cal-day-outside", isSelected ? "cal-day-selected" : "", isToday && !isSelected ? "cal-day-today" : "", hasPatients ? "cal-day-has-patients" : ""].filter(Boolean).join(" ")}
+                    onClick={() => { selectCalendarDate(cell.key); setCalendarOpen(false); }}
+                    aria-label={`${cell.day} ${MONTH_NAMES[cell.month - 1]} ${cell.year}`}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="cal-day-num">{cell.day}</span>
+                    {hasPatients && <span className="cal-dot" aria-hidden="true" />}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Bottom row: Clear + Today */}
+            <div className="cal-bottom-row">
+              <button
+                type="button"
+                className="cal-bottom-btn"
+                onClick={() => { selectCalendarDate(todayIST); setCalendarFilterActive(false); setCalendarOpen(false); }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="cal-bottom-btn cal-today-btn"
+                onClick={() => { selectCalendarDate(todayIST); setCalendarOpen(false); }}
+              >
+                Today
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="patient-header panel">
+        {/* Title */}
         <div>
           <h3>Patients</h3>
           <p className="muted">Search, review, and manage patient records.</p>
         </div>
+
+        {/* Search toolbar */}
         <div className="patient-toolbar">
           <div className="visit-status-toggle" role="group" aria-label="Filter by inpatient or outpatient">
             {(["all", "ip", "op"] as const).map((option) => (
@@ -414,15 +740,36 @@ export default function PatientsPage({
             Clear
           </Button>
         </div>
+
       </div>
 
       <div className="panel">
         <div className="list-meta">
           <p className="muted">
-            {query.trim()
-              ? `Showing ${displayPatients.length} search result${displayPatients.length === 1 ? "" : "s"}.`
-              : `Showing ${displayPatients.length} patient${displayPatients.length === 1 ? "" : "s"}.`}
+            {calendarFilterActive
+              ? `Showing ${displayPatients.length} patient${displayPatients.length === 1 ? "" : "s"} registered on ${(() => { const [y,m,d] = calendarDate.split("-"); return `${d}/${m}/${y}`; })()}.`
+              : query.trim()
+                ? `Showing ${displayPatients.length} search result${displayPatients.length === 1 ? "" : "s"}.`
+                : `Showing ${displayPatients.length} patient${displayPatients.length === 1 ? "" : "s"}.`}
           </p>
+          {calendarFilterActive && (
+            <button
+              type="button"
+              onClick={() => setCalendarFilterActive(false)}
+              style={{ fontSize: "11px", color: "#00828a", fontWeight: 700, background: "#f0fdfa", border: "1px solid #00828a", borderRadius: "5px", padding: "2px 10px", cursor: "pointer", marginLeft: "8px" }}
+            >
+              ✕ Clear date filter
+            </button>
+          )}
+          {calendarFilterActive && (
+            <button
+              type="button"
+              onClick={handlePrintDateList}
+              style={{ fontSize: "11px", color: "#fff", fontWeight: 700, background: "#00828a", border: "1px solid #00828a", borderRadius: "5px", padding: "2px 10px", cursor: "pointer", marginLeft: "8px" }}
+            >
+              🖨️ Print list
+            </button>
+          )}
           {loading && <Badge>Searching</Badge>}
         </div>
 
@@ -590,6 +937,315 @@ export default function PatientsPage({
           border-color: #00828a;
           box-shadow: 0 4px 12px rgba(0,130,138,0.1);
         }
+
+        /* ── Calendar corner widget ──────────────────────────────────── */
+        .cal-corner-wrap {
+          position: absolute;
+          top: -3.6rem;
+          right: 0;
+          z-index: 200;
+        }
+
+        /* Native date-picker style trigger bar */
+        .cal-input-bar {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 0 10px;
+          height: 36px;
+          border: 1.5px solid #00828a;
+          border-radius: 6px;
+          background: #fff;
+          color: #1e293b;
+          font-size: 0.85rem;
+          font-weight: 500;
+          cursor: pointer;
+          white-space: nowrap;
+          font-family: inherit;
+          user-select: none;
+          transition: border-color 0.13s, box-shadow 0.13s;
+          box-shadow: 0 1px 4px rgba(0,130,138,0.08);
+          min-width: 165px;
+        }
+        .cal-input-bar:hover, .cal-input-bar.open {
+          border-color: #00828a;
+          box-shadow: 0 0 0 2.5px rgba(0,130,138,0.15);
+        }
+        .cal-input-icon-left { flex-shrink: 0; color: #00828a; stroke: #00828a; }
+        .cal-input-icon-right { flex-shrink: 0; margin-left: auto; color: #94a3b8; stroke: #94a3b8; }
+        .cal-input-text {
+          flex: 1;
+          font-family: 'Courier New', monospace;
+          font-size: 0.84rem;
+          font-weight: 600;
+          color: #1e293b;
+          letter-spacing: 0.03em;
+        }
+        .cal-input-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: #00828a;
+          color: #fff;
+          border-radius: 999px;
+          font-size: 0.65rem;
+          font-weight: 700;
+          min-width: 18px;
+          height: 18px;
+          padding: 0 4px;
+          line-height: 1;
+        }
+
+        /* ── Dropdown popover ──────────────────────────────────────────── */
+        .cal-popover {
+          position: absolute;
+          top: calc(100% + 4px);
+          right: 0;
+          z-index: 400;
+          width: 240px;
+          background: #fff;
+          border: 1px solid #c8d6e5;
+          border-radius: 6px;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.18), 0 1px 4px rgba(0,0,0,0.08);
+          overflow: hidden;
+          animation: cal-pop-in 0.12s ease;
+        }
+        @keyframes cal-pop-in {
+          from { opacity: 0; transform: translateY(-4px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Month nav – native style: white bg, label left, arrows right */
+        .cal-nav {
+          display: flex;
+          align-items: center;
+          padding: 7px 10px 5px;
+          background: #fff;
+          border-bottom: 1px solid #f1f5f9;
+        }
+        .cal-nav-label {
+          flex: 1;
+          font-size: 0.82rem;
+          font-weight: 700;
+          color: #1e293b;
+          letter-spacing: 0.01em;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .cal-nav-arrow-wrap {
+          display: flex;
+          flex-direction: column;
+          gap: 0;
+          margin-left: 4px;
+        }
+        .cal-nav-arrow-btn {
+          background: none;
+          border: none;
+          color: #64748b;
+          font-size: 0.75rem;
+          line-height: 1;
+          padding: 0 2px;
+          cursor: pointer;
+          transition: color 0.1s;
+          font-family: inherit;
+        }
+        .cal-nav-arrow-btn:hover { color: #00828a; }
+        /* Day grid */
+        .cal-grid {
+          display: grid;
+          grid-template-columns: repeat(7, 1fr);
+          padding: 0.3rem 0.5rem 0.2rem;
+          gap: 2px;
+          background: #fff;
+        }
+        .cal-day-header {
+          text-align: center;
+          font-size: 0.65rem;
+          font-weight: 700;
+          color: #64748b;
+          padding: 3px 0 4px;
+          letter-spacing: 0.01em;
+        }
+        .cal-day {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          border: none;
+          background: none;
+          border-radius: 50%;
+          aspect-ratio: 1;
+          cursor: pointer;
+          transition: background 0.1s, color 0.1s;
+          padding: 0;
+          font-family: inherit;
+        }
+        .cal-day-blank { pointer-events: none; }
+        .cal-day-outside .cal-day-num { color: #9ca3af; }
+        .cal-day-num {
+          font-size: 0.75rem;
+          font-weight: 400;
+          line-height: 1;
+          color: #1e293b;
+        }
+        .cal-day:hover:not(.cal-day-blank):not(.cal-day-selected) {
+          background: #e8f5f6;
+          color: #00828a;
+        }
+        .cal-day:hover:not(.cal-day-blank):not(.cal-day-selected) .cal-day-num {
+          color: #00828a;
+        }
+        .cal-day-today .cal-day-num {
+          color: #00828a;
+          font-weight: 800;
+        }
+        .cal-day-selected {
+          background: #374151 !important;
+        }
+        .cal-day-selected .cal-day-num { color: #fff !important; font-weight: 700; }
+        .cal-day-selected .cal-dot { background: rgba(255,255,255,0.75); }
+        .cal-dot {
+          width: 3px;
+          height: 3px;
+          border-radius: 50%;
+          background: #00828a;
+          margin-top: 1px;
+          display: block;
+        }
+
+        /* Patient list inside popover */
+        .cal-pop-list { border-top: 1px solid #f1f5f9; }
+        .cal-pop-list-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.38rem 0.72rem;
+          background: #f8fafc;
+          border-bottom: 1px solid #f1f5f9;
+          font-size: 0.72rem;
+          color: #475569;
+          font-weight: 600;
+          gap: 6px;
+        }
+        .cal-print-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 3px 9px;
+          border: 1px solid #00828a;
+          border-radius: 5px;
+          background: #f0fdfa;
+          color: #00828a;
+          font-size: 0.7rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 0.11s, color 0.11s;
+          font-family: inherit;
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .cal-print-btn:hover { background: #00828a; color: #fff; }
+        .cal-print-btn:hover svg { stroke: #fff; }
+        .cal-pop-entries {
+          max-height: 220px;
+          overflow-y: auto;
+        }
+        .cal-pop-entry {
+          display: flex;
+          align-items: center;
+          gap: 0.45rem;
+          padding: 0.42rem 0.75rem;
+          border-bottom: 1px solid #f1f5f9;
+          cursor: pointer;
+          transition: background 0.09s;
+        }
+        .cal-pop-entry:last-child { border-bottom: none; }
+        .cal-pop-entry:hover { background: #f0fdfa; }
+        .cal-entry-idx {
+          font-size: 0.63rem;
+          font-weight: 700;
+          color: #94a3b8;
+          min-width: 18px;
+          text-align: right;
+        }
+        .cal-entry-info {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 0;
+          min-width: 0;
+        }
+        .cal-entry-name {
+          font-size: 0.8rem;
+          font-weight: 700;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          color: #1e293b;
+        }
+        .cal-entry-uid {
+          font-size: 0.65rem;
+          color: #94a3b8;
+        }
+        .cal-entry-meta {
+          font-size: 0.68rem;
+          color: #64748b;
+          white-space: nowrap;
+        }
+
+        /* Legend */
+        .cal-legend {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          padding: 5px 10px 6px;
+          font-size: 0.63rem;
+          color: #94a3b8;
+          border-top: 1px solid #f1f5f9;
+        }
+        .cal-legend-dot {
+          width: 6px; height: 6px;
+          background: #00828a;
+          border-radius: 50%;
+          display: inline-block;
+          flex-shrink: 0;
+        }
+        .cal-legend-today-box {
+          width: 10px; height: 10px;
+          border-radius: 2px;
+          background: #f0fdfa;
+          border: 1.5px solid #00828a;
+          display: inline-block;
+          flex-shrink: 0;
+        }
+
+        /* Bottom row: Clear + Today buttons (native date picker style) */
+        .cal-bottom-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 5px 10px 7px;
+          border-top: 1px solid #e2e8f0;
+          background: #fff;
+        }
+        .cal-bottom-btn {
+          background: none;
+          border: none;
+          font-size: 0.78rem;
+          font-weight: 600;
+          color: #00828a;
+          cursor: pointer;
+          padding: 2px 6px;
+          border-radius: 4px;
+          font-family: inherit;
+          transition: background 0.1s, color 0.1s;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+        .cal-bottom-btn:hover { background: #f0fdfa; }
+        .cal-today-btn { color: #00828a; }
       `}</style>
     </section>
   );
