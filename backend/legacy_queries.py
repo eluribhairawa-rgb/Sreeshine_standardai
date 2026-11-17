@@ -2484,7 +2484,10 @@ def _assign_doctor_slot(cursor, doctor_name, visit_type, appointment_date, appoi
     now = current_ist_datetime()
     if appointment_day == now.strftime("%Y-%m-%d"):
         now_minute = now.hour * 60 + now.minute
-        earliest = max(earliest, now_minute + (-now_minute % 5))
+        # A walk-in booked now is seen from now: use the actual booking minute (rounding up to the next
+        # 5 minutes showed e.g. a 1:56 pm walk-in as 2:00 pm, a time that had not come yet). It only moves
+        # later when the doctor already has a patient in that slot.
+        earliest = max(earliest, now_minute)
 
     raw = str(appointment_date).strip()
     time_match = re.search(r"[T ](\d{1,2}:\d{2})", raw)
