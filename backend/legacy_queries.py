@@ -1580,11 +1580,22 @@ def set_admission_payer(cursor, admission_id, payer, patient_id=None):
         )
 
 
-def add_admission(db, patient_id, notes="", hospital_id=None, payer=None):
+def add_admission(db, patient_id, notes="", hospital_id=None, payer=None, ip_number=None, admission_date=None):
+    """ip_number: hospital IP number typed at admission (optional, unique per hospital).
+    admission_date: when the patient was actually admitted (optional, defaults to now)."""
     scoped_hospital_id = hospital_id or resolve_hospital_id(db)
+    ip_number = (str(ip_number).strip() or None) if ip_number is not None else None
     with get_connection(db) as conn:
         cursor = conn.cursor()
         ensure_not_currently_admitted(cursor, patient_id)
+        if ip_number:
+            cursor.execute(
+                "SELECT id, patient_id FROM admissions WHERE hospital_id = ? AND LOWER(ip_number) = LOWER(?)",
+                (scoped_hospital_id, ip_number),
+            )
+            dup = cursor.fetchone()
+            if dup:
+                raise ValueError(f"IP ID {ip_number} is already used for patient {dup['patient_id']} (admission #{dup['id']}).")
         # One open admission per patient. A bed-less admission still counts: without this a
         # second admission could be opened and the bed and active-admission lookups would
         # then point at different admissions. The placeholder created by "Inpatient
@@ -1601,6 +1612,10 @@ def add_admission(db, patient_id, notes="", hospital_id=None, payer=None):
         if open_adm:
             if (open_adm["notes"] or "") == "Inpatient registration":
                 cursor.execute("UPDATE admissions SET notes = ? WHERE id = ?", (notes, open_adm["id"]))
+                if ip_number:
+                    cursor.execute("UPDATE admissions SET ip_number = ? WHERE id = ?", (ip_number, open_adm["id"]))
+                if admission_date:
+                    cursor.execute("UPDATE admissions SET admission_date = ? WHERE id = ?", (admission_date, open_adm["id"]))
                 if payer:
                     set_admission_payer(cursor, open_adm["id"], payer, patient_id)
                 conn.commit()
@@ -1613,11 +1628,11 @@ def add_admission(db, patient_id, notes="", hospital_id=None, payer=None):
         # instant; the session time zone (IST) only affects how it is read back.
         cursor.execute(
             """
-            INSERT INTO admissions (hospital_id, patient_id, admission_date, notes)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            INSERT INTO admissions (hospital_id, patient_id, admission_date, notes, ip_number)
+            VALUES (?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)
             RETURNING id
             """,
-            (scoped_hospital_id, patient_id, notes),
+            (scoped_hospital_id, patient_id, admission_date, notes, ip_number),
         )
         admission_id = cursor.fetchone()[0]
         if payer:

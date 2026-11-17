@@ -1,8 +1,7 @@
 import csv
 import io
 import os
-from datetime import datetime
-
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -18,6 +17,8 @@ import discharge_summary
 from storage import ObjectStorage
 from ocr import extract_text_from_image
 from export_utils import generate_pdf, generate_word
+
+IST = timezone(timedelta(hours=5, minutes=30))  # admission times typed at the desk are hospital time
 
 router = APIRouter(prefix="/api", tags=["patients"])
 STORAGE = ObjectStorage()
@@ -512,8 +513,26 @@ def admissions_create(patient_id: str, request: Request, payload: dict = Body(..
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Manually entered hospital IP number and actual admission date/time (both optional).
+    ip_number = str(payload.get("ip_number") or "").strip() or None
+    if ip_number and len(ip_number) > 40:
+        raise HTTPException(status_code=400, detail="IP ID is too long (max 40 characters).")
+    admission_date = None
+    raw_date = str(payload.get("admission_date") or "").strip()
+    if raw_date:
+        try:
+            parsed = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Admission date/time is not valid.")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)  # typed at the desk in hospital (IST) time
+        if parsed > datetime.now(IST) + timedelta(minutes=5):
+            raise HTTPException(status_code=400, detail="Admission date/time cannot be in the future.")
+        admission_date = parsed
+
     try:
-        admission_id = lq.add_admission(db, patient_id, notes, hospital_id=hospital_id, payer=payer)
+        admission_id = lq.add_admission(db, patient_id, notes, hospital_id=hospital_id, payer=payer,
+                                        ip_number=ip_number, admission_date=admission_date)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     log_audit_event(db, user, client_ip(request), "create", "admissions", str(admission_id),

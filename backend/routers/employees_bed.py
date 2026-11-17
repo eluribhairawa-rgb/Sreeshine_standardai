@@ -440,12 +440,25 @@ def allot_bed_api(request: Request, payload: dict = Body(...), db: Session = Dep
                 "UPDATE hospital_beds SET status = 'available' WHERE LOWER(ward) = LOWER(?) AND LOWER(bed_no) = LOWER(?)",
                 (prev["ward"], prev["bed_no"]),
             )
+        # The first bed of an admission starts when the patient was admitted (the admission date/time may be
+        # entered manually, e.g. an admission recorded a few hours late), so bed days are counted from then.
+        # Later transfers start now.
+        allocated_at = None
+        if admission_id:
+            cursor.execute("SELECT COUNT(*) AS n FROM bed_allocations WHERE admission_id = ?", (admission_id,))
+            if int(cursor.fetchone()["n"] or 0) == 0:
+                cursor.execute(
+                    "SELECT LEAST(admission_date, CURRENT_TIMESTAMP) AS start FROM admissions WHERE id = ?",
+                    (admission_id,),
+                )
+                row = cursor.fetchone()
+                allocated_at = row["start"] if row else None
         cursor.execute(
             """
-            INSERT INTO bed_allocations (admission_id, patient_id, ward, room_no, bed_no, amount_per_day, total_days, total_amount, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            INSERT INTO bed_allocations (admission_id, patient_id, ward, room_no, bed_no, amount_per_day, total_days, total_amount, status, allocated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', COALESCE(?, CURRENT_TIMESTAMP))
             """,
-            (admission_id, patient_id, ward, room_no, bed_no, amount_per_day, total_days, total_amount),
+            (admission_id, patient_id, ward, room_no, bed_no, amount_per_day, total_days, total_amount, allocated_at),
         )
         bed_id = cursor.lastrowid
         cursor.execute(

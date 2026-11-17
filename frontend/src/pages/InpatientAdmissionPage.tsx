@@ -44,6 +44,19 @@ const DEFAULT_ADMISSION_TYPES = [
   "Inter-facility Transfer",
 ];
 
+/** Current local date-time as a datetime-local value ("YYYY-MM-DDTHH:mm"). */
+function nowLocalInput(): string {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+/** "2026-11-17T13:56" -> "17/11/2026, 1:56 pm" */
+function formatLocalInput(value: string): string {
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value : d.toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" });
+}
+
 export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props) {
   // The patient being admitted -- always an already-registered patient,
   // found by search. Registration itself happens once, at the Registration
@@ -95,6 +108,9 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
   const [triagePriority, setTriagePriority] = useState<"" | "Critical" | "Urgent" | "Stable">("");
   const [reasonForAdmission, setReasonForAdmission] = useState("");
   const [expectedStay, setExpectedStay] = useState("");
+  // Hospital IP number and the actual admission date/time, both entered at the desk.
+  const [ipNumber, setIpNumber] = useState("");
+  const [admittedAt, setAdmittedAt] = useState(nowLocalInput);
   const [notes, setNotes] = useState("");
   // Who pays for this stay -- prefilled from the patient's insurance on record.
   const [payer, setPayer] = useState<AdmissionPayer>(EMPTY_PAYER);
@@ -273,6 +289,8 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
     setTriagePriority("");
     setReasonForAdmission("");
     setExpectedStay("");
+    setIpNumber("");
+    setAdmittedAt(nowLocalInput());
     setNotes("");
     setPayer(EMPTY_PAYER);
     setSelectedBedNo("");
@@ -313,6 +331,18 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
       setNotice({ type: "warning", message: "Please enter the clinical reason for inpatient admission." });
       return;
     }
+    if (!ipNumber.trim()) {
+      setNotice({ type: "warning", message: "Please enter the IP ID for this admission." });
+      return;
+    }
+    if (!admittedAt) {
+      setNotice({ type: "warning", message: "Please enter the admission date and time." });
+      return;
+    }
+    if (new Date(admittedAt).getTime() > Date.now() + 5 * 60 * 1000) {
+      setNotice({ type: "warning", message: "Admission date and time cannot be in the future." });
+      return;
+    }
     const payerProblem = payerError(payer);
     if (payerProblem) {
       setNotice({ type: "warning", message: payerProblem });
@@ -336,6 +366,8 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
         method: "POST",
         body: JSON.stringify({
           notes: noteLines.join(" | "),
+          ip_number: ipNumber.trim(),
+          admission_date: admittedAt, // local (IST) wall-clock time, e.g. 2026-11-17T13:56
           payer_type: payer.payer_type,
           insurance_provider: payer.insurance_provider.trim() || undefined,
           insurance_policy_no: payer.insurance_policy_no.trim() || undefined,
@@ -365,8 +397,8 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
         patientName: selectedPatient.patientName,
         ageGender: selectedPatient.ageGender,
         mobile: selectedPatient.mobile,
-        admissionId: admRes.admission_id ? `ADM-${admRes.admission_id}` : "ADM-Confirmed",
-        admissionDate: new Date().toLocaleString("en-IN"),
+        admissionId: ipNumber.trim() || (admRes.admission_id ? `ADM-${admRes.admission_id}` : "ADM-Confirmed"),
+        admissionDate: formatLocalInput(admittedAt),
         department,
         doctor: consultingDoctor,
         admissionType,
@@ -419,7 +451,7 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
               <strong style="font-size: 17px; color: #00828a; font-family: monospace;">${rec.uhid}</strong>
             </div>
             <div style="text-align: right;">
-              <div style="font-size: 10.5px; font-weight: 700; color: #15803d; text-transform: uppercase;">ADMISSION #</div>
+              <div style="font-size: 10.5px; font-weight: 700; color: #15803d; text-transform: uppercase;">IP ID</div>
               <strong style="font-size: 15px; color: #15803d;">${rec.admissionId || "ADM-ACTIVE"}</strong>
             </div>
           </div>
@@ -460,7 +492,7 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
       `*HospAI Hospital - Inpatient Admission & Bed Allocation Slip*`,
       `----------------------------------------`,
       `Patient: ${rec.patientName} (UHID: ${rec.uhid})`,
-      `Admission #: ${rec.admissionId || "ADM-ACTIVE"}`,
+      `IP ID: ${rec.admissionId || "ADM-ACTIVE"}`,
       `Admission Date: ${rec.admissionDate || new Date().toLocaleString("en-IN")}`,
       `Department: ${rec.department}`,
       `Consultant Doctor: ${rec.doctor}`,
@@ -822,6 +854,33 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
           </div>
         </div>
 
+        {/* Row C: IP ID * and Admission Date & Time * (entered manually) */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px", marginBottom: "18px" }}>
+          <div>
+            <Label>IP ID <span style={{ color: "#ef4444" }}>*</span></Label>
+            <Input
+              type="text"
+              name="ip_number"
+              value={ipNumber}
+              maxLength={40}
+              onChange={(e) => setIpNumber(e.target.value.replace(/\s+/g, " ").trimStart())}
+              placeholder="e.g. IP-2026-0123"
+              style={{ height: "42px" }}
+            />
+          </div>
+          <div>
+            <Label>Admission Date &amp; Time <span style={{ color: "#ef4444" }}>*</span></Label>
+            <Input
+              type="datetime-local"
+              name="admission_date"
+              value={admittedAt}
+              max={nowLocalInput()}
+              onChange={(e) => setAdmittedAt(e.target.value)}
+              style={{ height: "42px" }}
+            />
+          </div>
+        </div>
+
         {/* Clinical Notes / Pre-Op Instructions */}
         <div style={{ marginBottom: "22px" }}>
           <Label>Admission Directives / Pre-Op Instructions (optional)</Label>
@@ -1055,7 +1114,8 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
                 <div>Patient: <strong>{admittedRecord.patientName}</strong></div>
                 <div>UHID: <strong>{admittedRecord.uhid}</strong></div>
-                <div>Admission #: <strong>{admittedRecord.admissionId}</strong></div>
+                <div>IP ID: <strong>{admittedRecord.admissionId}</strong></div>
+                <div>Admitted on: <strong>{admittedRecord.admissionDate}</strong></div>
                 <div>Ward / Bed: <strong>{admittedRecord.ward} · {admittedRecord.bedNo}</strong></div>
                 <div>Department: <strong>{admittedRecord.department}</strong></div>
                 <div>Doctor: <strong>{admittedRecord.doctor}</strong></div>
