@@ -290,6 +290,13 @@ export default function OpPage({ setNotice, canEdit }: Props) {
       setNotice({ type: "error", message: "Please select a doctor." });
       return;
     }
+    const editingId = Number(scheduleForm.id) || 0;
+    const wanted = scheduleForm.doctor_name.trim().toLowerCase();
+    const existing = schedules.find((s) => !s.schedule_date && Number(s.id) !== editingId && (s.doctor_name || "").trim().toLowerCase() === wanted);
+    if (existing) {
+      setNotice({ type: "error", message: `Doctor ${scheduleForm.doctor_name.trim()} is already added${existing.department ? ` in ${existing.department}` : ""}. Edit the existing entry instead.` });
+      return;
+    }
     setSavingSchedule(true);
     try {
       const scheduleId = Number(scheduleForm.id);

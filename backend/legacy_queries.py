@@ -3293,6 +3293,23 @@ def _expand_schedule_dates(raw_schedule_date):
 
 
 
+def _ensure_doctor_not_in_roster(cursor, doctor_name, exclude_id=None):
+    """A doctor can be on the permanent roster only once (name match ignores case and spaces)."""
+    cursor.execute(
+        """
+        SELECT id, department FROM doctor_schedules
+        WHERE schedule_date IS NULL AND LOWER(TRIM(doctor_name)) = LOWER(TRIM(?)) AND id != ?
+        LIMIT 1
+        """,
+        (doctor_name, exclude_id or 0),
+    )
+    dup = cursor.fetchone()
+    if dup:
+        dept = (dup["department"] or "").strip()
+        raise ValueError(f"Doctor '{str(doctor_name).strip()}' is already added{f' in {dept}' if dept else ''}. Edit the existing entry instead of adding the doctor again.")
+
+
+
 def create_doctor_schedule(db, data):
     with get_connection(db) as conn:
         cursor = conn.cursor()
@@ -3308,6 +3325,7 @@ def create_doctor_schedule(db, data):
 
         # --- Permanent roster entry (no date) ---
         if not raw_date:
+            _ensure_doctor_not_in_roster(cursor, doctor_name)
             cursor.execute(
                 """
                 INSERT INTO doctor_schedules (
@@ -3433,6 +3451,8 @@ def update_doctor_schedule(db, schedule_id, data):
         new_date = data.get("schedule_date", existing["schedule_date"])
         new_start = data.get("start_time", existing["start_time"])
         new_end = data.get("end_time", existing["end_time"])
+        if not new_date:
+            _ensure_doctor_not_in_roster(cursor, new_doctor, exclude_id=schedule_id)
         # Block overlapping schedules for the SAME doctor on the same date,
         # but exclude the row being updated from the conflict check.
         cursor.execute(
