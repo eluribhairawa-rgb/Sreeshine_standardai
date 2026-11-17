@@ -138,9 +138,13 @@ def insurance_providers_create(request: Request, payload: dict = Body(...), db: 
 
 
 @router.get("/patients/next-id")
-def patients_next_id(db: Session = Depends(get_db), user: dict = Depends(get_current_user),
+def patients_next_id(registration_date: str | None = None, db: Session = Depends(get_db), user: dict = Depends(get_current_user),
                       hospital_id: int = Depends(current_hospital_id)):
-    return {"patient_id": lq.generate_patient_id(db, hospital_id=hospital_id)}
+    try:
+        on_date = lq.parse_registration_date(registration_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"patient_id": lq.generate_patient_id(db, hospital_id=hospital_id, on_date=on_date)}
 
 
 @router.post("/patients")
@@ -158,7 +162,11 @@ def patients_create(request: Request, payload: dict = Body(...), db: Session = D
             "duplicate": row_to_dict(duplicate),
         })
 
-    patient_id = lq.generate_patient_id(db, hospital_id=hospital_id)
+    try:
+        registration_date = lq.parse_registration_date(payload.get("registration_date"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    patient_id = lq.generate_patient_id(db, hospital_id=hospital_id, on_date=registration_date)
 
     allergy_text = str(payload.get("allergies") or "").strip()
     no_known_allergies = bool(payload.get("no_known_allergies"))
@@ -206,7 +214,9 @@ def patients_create(request: Request, payload: dict = Body(...), db: Session = D
             "status": "active"
         })
         
-    log_audit_event(db, user, client_ip(request), "create", "patients", patient_id, {"admission_id": admission_id})
+    if registration_date:
+        lq.backdate_patient_records(db, patient_id, registration_date)
+    log_audit_event(db, user, client_ip(request), "create", "patients", patient_id, {"admission_id": admission_id, "registration_date": registration_date})
     return {"status": "ok", "patient_id": patient_id, "admission_id": admission_id, "encounter_id": encounter_id}
 
 

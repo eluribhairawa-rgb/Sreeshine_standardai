@@ -11,6 +11,7 @@ import { doctorsInDepartment, useDoctorDirectory } from "../lib/doctorDirectory"
 import { Modal } from "../components/ui";
 import { COUNTRY_CODE_RULES, parsePhoneInput, splitStoredPhone, toWhatsAppNumber, validateMobileByCountry } from "../lib/phone";
 import PhoneInput from "../components/PhoneInput";
+import DateCalendarPicker, { parseIsoDate } from "../components/DateCalendarPicker";
 
 const COUNTRY_OPTIONS = Object.values(COUNTRY_CODE_RULES).map((r) => r.label);
 
@@ -173,7 +174,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
 
   const fetchNextUhid = async () => {
     try {
-      const data = await apiFetch<{ patient_id: string }>("/api/patients/next-id");
+      const data = await apiFetch<{ patient_id: string }>(`/api/patients/next-id?registration_date=${registrationDate}`);
       if (data?.patient_id) {
         setNextUhid(data.patient_id);
       }
@@ -187,6 +188,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [dob, setDob] = useState("");
+  const [registrationDate, setRegistrationDate] = useState(() => new Date().toLocaleDateString("en-CA"));
+  const registrationDateGb = parseIsoDate(registrationDate).toLocaleDateString("en-GB");
   const [age, setAge] = useState("");
   const [gender, setGender] = useState("");
   const [maritalStatus, setMaritalStatus] = useState("");
@@ -258,8 +261,13 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     }
   });
 
+  // The UHID carries the registration date (PAT-YYYYMMDD-NNNN), so refresh it when the date changes.
   useEffect(() => {
-    fetchNextUhid();
+    void fetchNextUhid();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registrationDate]);
+
+  useEffect(() => {
     void loadInsuranceProviders();
 
     // Check for pre-booked patient prefill data
@@ -546,6 +554,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     try {
       let createdPatientId = "";
       const payload: Record<string, unknown> = {
+        registration_date: registrationDate,
         name: fName,
         last_name: lName,
         dob: dob || undefined,
@@ -636,6 +645,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
             await apiFetch(`/api/patients/${createdPatientId}/vitals`, {
               method: "POST",
               body: JSON.stringify({
+                registration_date: registrationDate,
                 bp: vitalsBp || undefined,
                 pulse: vitalsPulse || undefined,
                 temperature: vitalsTemp || undefined,
@@ -685,7 +695,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
               doctor_name: "Emergency Duty Medical Officer",
               consultation_fee: 0,
               visit_type: "emergency",
-              appointment_date: new Date().toLocaleDateString("en-CA"), // local date; toISOString() is UTC (yesterday before 5:30 AM IST)
+              registration_date: registrationDate,
+              appointment_date: registrationDate,
               payment_mode: "pending",
               status: "in-consultation",
               notes: `[EMERGENCY - ${emergencyTriage}] Attendant: ${emergencyAttendant || "N/A"}. Issue: ${emergencyComplaint || "Immediate triage required"}`,
@@ -701,6 +712,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
           const encRes = await apiFetch<{ encounter_id?: number }>(`/api/patients/${createdPatientId}/encounters`, {
             method: "POST",
             body: JSON.stringify({
+              registration_date: registrationDate,
               encounter_type: "EMERGENCY",
               appointment_id: appointmentId,
               chief_complaint: emergencyComplaint || "Immediate triage required",
@@ -719,6 +731,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
             await apiFetch(`/api/patients/${createdPatientId}/vitals`, {
               method: "POST",
               body: JSON.stringify({
+                registration_date: registrationDate,
                 bp: emergencyBp || undefined,
                 pulse: emergencyPulse || undefined,
                 temperature: emergencyTemp || undefined,
@@ -831,7 +844,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         consultation_fee: Number(consultationFee) || 500,
         discount: consultationDiscountAmt,
         visit_type: visitType === "IP" ? "ip" : "op",
-        appointment_date: new Date().toLocaleDateString("en-CA"), // local date; toISOString() is UTC (yesterday before 5:30 AM IST)
+        registration_date: registrationDate,
+              appointment_date: registrationDate,
         payment_mode: paymentMode.toLowerCase(),
         status: "waiting",
         notes: visitType === "IP"
@@ -845,6 +859,10 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
       });
 
       const tokenNo = apptRes?.token_no || "Live";
+      try {
+        // Queue Management opens on the booked date, so a back-dated visit is visible straight away.
+        sessionStorage.setItem("hospai_queue_date", registrationDate);
+      } catch { /* ignore */ }
 
       setBookedAppointment({
         tokenNo,
@@ -853,7 +871,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         department: selectedDepartment,
         fee: consultationNetFee,
         paymentMode,
-        date: new Date().toLocaleDateString("en-GB"),
+        date: registrationDateGb,
         patientId: currentId!,
         patientName: currentName,
         age: currentAge,
@@ -966,7 +984,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
             <strong>Live Queue Token:</strong> <span style="font-size: 18px; font-weight: 900; color: #2563eb;">#${tokenPart}</span>
           </div>
           ` : ""}
-          <div><strong>Date:</strong> ${new Date().toLocaleDateString("en-GB")}</div>
+          <div><strong>Date:</strong> ${registrationDateGb}</div>
           <div><strong>Name:</strong> ${target.name}</div>
           <div><strong>Age / Gender:</strong> ${target.age || "-"} / ${target.gender || "-"}</div>
           <div><strong>Mobile:</strong> ${target.phone || "-"}</div>
@@ -1014,10 +1032,15 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         .rx-f { display: flex; gap: 6px; }
         .rx-l { color: #475569; font-weight: 700; min-width: 92px; }
         .rx-v { font-weight: 700; }
-        .rx-sym { font-family: "Times New Roman", Georgia, serif; font-size: 54px; font-weight: 700; color: #00828a; line-height: 1; margin: 18px 0 0 4px; }
-        .rx-space { min-height: 150mm; }
-        .rx-sign { display: flex; justify-content: flex-end; margin-top: 8mm; font-size: 12.5px; }
-        .rx-sign div { border-top: 1px solid #334155; padding-top: 4px; min-width: 60mm; text-align: center; font-weight: 700; }
+        .rx-section { margin: 10px 0 0; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; }
+        .rx-section-title { background: #f0fdfa; border-bottom: 1px solid #e2e8f0; padding: 5px 12px; font-size: 11px; font-weight: 800; color: #00828a; text-transform: uppercase; letter-spacing: 0.06em; }
+        .rx-section-body { padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px 28px; font-size: 12.5px; }
+        .rx-vital { display: flex; gap: 5px; }
+        .rx-vital-l { color: #475569; font-weight: 700; min-width: 60px; }
+        .rx-vital-v { font-weight: 700; }
+        .rx-diag { font-size: 13px; font-weight: 700; color: #0f172a; padding: 6px 12px 10px; }
+        .rx-space { min-height: 110mm; }
+
       </style></head><body>
       <!-- Keep the hospital header (logo row); data-hospai-print-hide-report-row drops only the title / address / print-date row. -->
       <div class="rx-head" data-hospai-print-hide-report-row>
@@ -1030,9 +1053,24 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         ${row("Date", esc(dateText))}
         ${row("Time", esc(timeText))}
       </div>
-      <div class="rx-sym">&#8478;</div>
+
+      <div class="rx-section">
+        <div class="rx-section-title">Vitals</div>
+        <div class="rx-section-body">
+          <div class="rx-vital"><span class="rx-vital-l">BP</span><span class="rx-vital-v">_____ mmHg</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Pulse</span><span class="rx-vital-v">_____ bpm</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Temp</span><span class="rx-vital-v">_____ °F</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Weight</span><span class="rx-vital-v">_____ kg</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">SpO₂</span><span class="rx-vital-v">_____ %</span></div>
+        </div>
+      </div>
+
+      <div class="rx-section">
+        <div class="rx-section-title">Diagnosis / Chief Complaint</div>
+        <div class="rx-diag">______________________________________________</div>
+      </div>
+
       <div class="rx-space"></div>
-      <div class="rx-sign"><div>Doctor's Signature<br/><span style="font-weight:400">${esc(appt.doctor)}</span></div></div>
       </body></html>`;
     printViaIframe(html);
   };
@@ -1073,12 +1111,6 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     }, setNotice);
   };
 
-  const todayFormatted = new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(new Date()).replace(/\//g, "-");
-
   return (
     <div className="patient-registration-page" style={{ padding: "20px 28px 48px", background: "#f8fafc", minHeight: "100vh" }}>
       {/* Top Breadcrumb */}
@@ -1101,26 +1133,12 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
           </p>
         </div>
 
-        {/* Date chip exactly matching screenshot */}
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "8px",
-            background: "#ffffff",
-            border: "1px solid #cbd5e1",
-            borderRadius: "8px",
-            padding: "8px 14px",
-            fontSize: "13px",
-            fontWeight: 600,
-            color: "#1e293b",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-          }}
-        >
-          <span style={{ fontSize: "15px" }}>📅</span>
-          <span>{todayFormatted}</span>
-          <span style={{ fontSize: "10px", color: "#64748b", marginLeft: "2px" }}>▾</span>
-        </div>
+        {/* Date picker (shared calendar) */}
+        <DateCalendarPicker
+          value={registrationDate}
+          onChange={setRegistrationDate}
+          formatLabel={(iso) => parseIsoDate(iso).toLocaleDateString("en-GB").replace(/\//g, "-")}
+        />
       </div>
 
       {duplicateInfo && (
@@ -2353,7 +2371,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
                   onClick={handlePrintPrescription}
                   title="Print a blank prescription with the patient, doctor, department, date and time"
                 >
-                  <span style={{ fontFamily: "'Times New Roman', Georgia, serif", fontSize: "17px", lineHeight: 1 }}>℞</span> Print Prescription
+                  🖨️ Print Prescription
                 </button>
 
                 <button

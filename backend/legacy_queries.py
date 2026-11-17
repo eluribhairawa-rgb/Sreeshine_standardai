@@ -712,7 +712,90 @@ def _next_period_based_uhid_suffix(used_suffixes, dt):
 
 
 
-def generate_patient_id(db, hospital_id=None):
+def parse_registration_date(value):
+    """Validate an optional back-dated registration date (YYYY-MM-DD, IST). Returns the date
+    string, or None when blank / today. Future dates are rejected."""
+    text_value = str(value or "").strip()[:10]
+    if not text_value:
+        return None
+    try:
+        chosen = datetime.strptime(text_value, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("Registration date must be a valid date (YYYY-MM-DD).")
+    today = current_ist_datetime().date()
+    if chosen > today:
+        raise ValueError("Registration date cannot be in the future.")
+    if chosen.year < 2000:
+        raise ValueError("Registration date is too far in the past.")
+    return None if chosen == today else chosen.isoformat()
+
+
+
+_BACKDATE_SKIP_WORDS = ("due", "schedul", "expected", "next", "reversal", "expire", "valid_until", "appointment_date")
+_backdate_columns_cache = None
+
+
+
+def _backdate_columns(cursor):
+    """Every timestamp column on a table that carries patient_id (cached)."""
+    global _backdate_columns_cache
+    if _backdate_columns_cache is None:
+        cursor.execute(
+            """
+            SELECT c.table_name AS table_name, c.column_name AS column_name
+            FROM information_schema.columns c
+            JOIN information_schema.columns d
+              ON d.table_schema = c.table_schema AND d.table_name = c.table_name AND d.column_name = 'patient_id'
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+            WHERE c.table_schema = 'public' AND c.data_type LIKE 'timestamp%'
+              AND c.table_name NOT LIKE '%audit%'
+            ORDER BY c.table_name, c.column_name
+            """
+        )
+        pairs = []
+        for row in cursor.fetchall():
+            table = row["table_name"] if hasattr(row, "keys") else row[0]
+            column = row["column_name"] if hasattr(row, "keys") else row[1]
+            if any(word in column for word in _BACKDATE_SKIP_WORDS):
+                continue
+            pairs.append((table, column))
+        _backdate_columns_cache = pairs
+    return _backdate_columns_cache
+
+
+
+def backdate_patient_records(db, patient_id, registration_date):
+    """Re-stamp everything created today for this patient onto the chosen registration date,
+    keeping the time of day, so the whole record (patient, vitals, consultation start/finish,
+    invoices, payments, prescriptions, notes, documents, ...) and payment reports land under
+    that date. Only values from today up to now are moved; future-dated values are left alone."""
+    reg = parse_registration_date(registration_date)
+    if not reg or not patient_id:
+        return False
+    today = current_ist_datetime().date().isoformat()
+    shift = "(CAST(? AS date) - CAST(? AS date)) * INTERVAL '1 day'"
+    window = "CAST(? AS date)"
+    with get_connection(db) as conn:
+        cursor = conn.cursor()
+        for table, column in _backdate_columns(cursor):
+            cursor.execute(
+                f'UPDATE "{table}" SET "{column}" = "{column}" - {shift} '
+                f'WHERE patient_id = ? AND "{column}" >= {window} AND "{column}" < (CURRENT_TIMESTAMP + INTERVAL \'1 hour\')',
+                (today, reg, patient_id, today),
+            )
+        for table, column in (("invoice_payments", "created_at"),):
+            cursor.execute(
+                f'UPDATE "{table}" SET "{column}" = "{column}" - {shift} '
+                f'WHERE invoice_id IN (SELECT id FROM invoices WHERE patient_id = ?) AND "{column}" >= {window} AND "{column}" < (CURRENT_TIMESTAMP + INTERVAL \'1 hour\')',
+                (today, reg, patient_id, today),
+            )
+        conn.commit()
+    return True
+
+
+
+def generate_patient_id(db, hospital_id=None, on_date=None):
     """Generate date-prefixed sequential patient IDs per hospital.
 
     Required desktop format:
@@ -723,7 +806,7 @@ def generate_patient_id(db, hospital_id=None):
     generated ID stays unique and does not overwrite client data.
     """
     scoped_hospital_id = hospital_id or resolve_hospital_id(db)
-    today = current_ist_datetime().strftime("%Y%m%d")
+    today = (on_date.replace("-", "") if on_date else current_ist_datetime().strftime("%Y%m%d"))
     with get_connection(db) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1356,7 +1439,7 @@ def record_vitals(db, patient_id, data, username, encounter_id=None, admission_i
                 parse_float(data.get("height")),
                 admission_id,
                 parse_int(encounter_id),
-                username,
+                (str(data.get("nurse_name") or "").strip()[:80] or username),
             ),
         )
         vital_id = cursor.lastrowid

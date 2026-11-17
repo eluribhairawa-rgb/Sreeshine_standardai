@@ -47,7 +47,16 @@ export default function OpQueuePage({ setNotice, onOpenPatient, scopedDoctor }: 
   const [showTv, setShowTv] = useState(false);
 
   // Filters state
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toLocaleDateString("en-CA"));
+  const [selectedDate, setSelectedDate] = useState(() => {
+    try {
+      const booked = sessionStorage.getItem("hospai_queue_date");
+      if (booked) {
+        sessionStorage.removeItem("hospai_queue_date");
+        return booked;
+      }
+    } catch { /* ignore */ }
+    return new Date().toLocaleDateString("en-CA");
+  });
   const [selectedDepartment, setSelectedDepartment] = useState("All Departments");
   const [selectedDoctor, setSelectedDoctor] = useState("All Doctors");
   const [selectedVisitType, setSelectedVisitType] = useState("All");
@@ -552,7 +561,7 @@ export default function OpQueuePage({ setNotice, onOpenPatient, scopedDoctor }: 
               onChange={(e) => {
                 const newDate = e.target.value;
                 setSelectedDate(newDate);
-                setStatusTab("Completed");
+                setStatusTab("ALL");
                 if (newDate) {
                   void fetchLiveAppointments(newDate);
                 }

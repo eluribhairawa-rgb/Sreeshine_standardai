@@ -88,7 +88,7 @@ type CareLogRow = {
   created_at?: string;
 };
 
-const EMPTY_VITALS_FORM = { bp: "", pulse: "", temperature: "", respiratory_rate: "", spo2: "", blood_sugar: "", pain_score: "" };
+const EMPTY_VITALS_FORM = { nurse_name: "", bp: "", pulse: "", temperature: "", respiratory_rate: "", spo2: "", blood_sugar: "", pain_score: "" };
 const EMPTY_NOTE_FORM = { nurse_name: "", activity: "", remarks: "" };
 
 const STATUS_OPTIONS = [
@@ -244,7 +244,7 @@ export default function NurseEmarPage({ setNotice }: Props) {
 
   useEffect(() => {
     if (!selected) return;
-    setVitalsForm(EMPTY_VITALS_FORM);
+    setVitalsForm((prev) => ({ ...EMPTY_VITALS_FORM, nurse_name: prev.nurse_name }));
     setNoteForm(EMPTY_NOTE_FORM);
     void loadVitals(selected);
     void loadCareLogs(selected);
@@ -252,7 +252,8 @@ export default function NurseEmarPage({ setNotice }: Props) {
 
   const submitVitals = async () => {
     if (!selected) return;
-    const hasAnyValue = Object.values(vitalsForm).some((v) => v.trim() !== "");
+    if (!vitalsForm.nurse_name.trim()) { setNotice({ type: "warning", message: "Enter the nurse name who is recording these vitals." }); return; }
+    const hasAnyValue = Object.entries(vitalsForm).some(([k, v]) => k !== "nurse_name" && v.trim() !== "");
     if (!hasAnyValue) { setNotice({ type: "warning", message: "Enter at least one vital sign." }); return; }
     setSavingVitals(true);
     try {
@@ -261,7 +262,7 @@ export default function NurseEmarPage({ setNotice }: Props) {
         body: JSON.stringify({ ...vitalsForm, admission_id: selected.admission_id }),
       });
       setNotice({ type: "success", message: "Vitals recorded." });
-      setVitalsForm(EMPTY_VITALS_FORM);
+      setVitalsForm({ ...EMPTY_VITALS_FORM, nurse_name: vitalsForm.nurse_name });
       await loadVitals(selected);
     } catch (err: any) {
       reportError(setNotice, err, "Could not record vitals.");
@@ -404,6 +405,7 @@ export default function NurseEmarPage({ setNotice }: Props) {
               {detailTab === "vitals" && (
                 <>
                   <div className="diag-form-grid">
+                    <div className="diag-form-full"><Label>Nurse Name *</Label><Input value={vitalsForm.nurse_name} maxLength={80} onChange={(e) => setVitalsForm({ ...vitalsForm, nurse_name: e.target.value })} placeholder="Name of the nurse recording these vitals" /></div>
                     <div><Label>BP</Label><Input value={vitalsForm.bp} inputMode="numeric" onChange={(e) => setVitalsForm({ ...vitalsForm, bp: filterBP(e.target.value) })} placeholder="120/80" /></div>
                     <div><Label>Pulse</Label><Input value={vitalsForm.pulse} inputMode="numeric" onChange={(e) => setVitalsForm({ ...vitalsForm, pulse: filterInteger(e.target.value) })} placeholder="bpm" /></div>
                     <div><Label>Temp (°C)</Label><Input value={vitalsForm.temperature} inputMode="decimal" onChange={(e) => setVitalsForm({ ...vitalsForm, temperature: filterDecimal(e.target.value) })} placeholder="37.0" /></div>

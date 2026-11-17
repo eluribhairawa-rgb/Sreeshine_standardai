@@ -106,6 +106,8 @@ def patient_vitals_create(patient_id: str, request: Request, payload: dict = Bod
                                      encounter_id=payload.get("encounter_id"), admission_id=payload.get("admission_id"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if payload.get("registration_date"):
+        lq.backdate_patient_records(db, patient_id, payload.get("registration_date"))
     log_audit_event(db, user, client_ip(request), "create", "patient_vitals", str(vital_id), {"patient_id": patient_id})
     return {"status": "ok", "vital_id": vital_id}
 
@@ -144,6 +146,8 @@ def patient_encounter_create(patient_id: str, request: Request, payload: dict = 
         "triage_priority": payload.get("triage_priority"), "attendant_name": payload.get("attendant_name"),
         "attending_doctor": payload.get("attending_doctor"),
     })
+    if payload.get("registration_date"):
+        lq.backdate_patient_records(db, patient_id, payload.get("registration_date"))
     log_audit_event(db, user, client_ip(request), "create", "encounters", str(encounter_id), {"patient_id": patient_id})
     return {"encounter_id": encounter_id, "encounter_no": encounter_no}
 

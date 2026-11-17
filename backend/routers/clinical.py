@@ -182,7 +182,11 @@ def appointments_create(request: Request, payload: dict = Body(...), db: Session
     if appointment_date_str:
         try:
             app_date_str = appointment_date_str.split("T")[0].split(" ")[0]
-            if app_date_str < datetime.now().strftime("%Y-%m-%d"):
+            try:
+                back_date = lq.parse_registration_date(payload.get("registration_date"))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            if app_date_str < datetime.now().strftime("%Y-%m-%d") and app_date_str != back_date:
                 raise HTTPException(status_code=400, detail="Appointment date cannot be earlier than today's date.")
         except HTTPException:
             raise
@@ -206,6 +210,11 @@ def appointments_create(request: Request, payload: dict = Body(...), db: Session
         logger.exception("Could not schedule appointment")
         raise HTTPException(status_code=500, detail="Could not schedule appointment or generate token. Please try again.")
 
+    if payload.get("registration_date") and patient_id:
+        try:
+            lq.backdate_patient_records(db, patient_id, payload.get("registration_date"))
+        except Exception:
+            logger.exception("Could not back-date records for %s", patient_id)
     try:
         log_audit_event(db, user, client_ip(request), "create", "appointments", str(appointment_id),
                          {"patient_name": payload.get("patient_name"), "token_no": token_no, "invoice_id": invoice_id, "payment_id": payment_id})
@@ -227,6 +236,14 @@ def appointments_update(appointment_id: int, request: Request, payload: dict = B
         raise HTTPException(status_code=400, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    # A visit booked on a past date keeps everything the doctor records for it (prescription,
+    # notes, receipts, documents) on that date instead of today's.
+    try:
+        appt = db.execute(text("SELECT patient_id, DATE(appointment_date) AS d FROM appointments WHERE id = :i"), {"i": appointment_id}).fetchone()
+        if appt and appt.patient_id and appt.d and str(appt.d) < lq.current_ist_datetime().date().isoformat():
+            lq.backdate_patient_records(db, appt.patient_id, str(appt.d))
+    except Exception:
+        logger.exception("Could not align records with appointment date for appointment %s", appointment_id)
     log_audit_event(db, user, client_ip(request), "update", "appointments", str(appointment_id), {"status": payload.get("status")})
     return {"status": "ok"}
 
