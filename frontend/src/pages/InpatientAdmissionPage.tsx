@@ -111,6 +111,9 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
   // Hospital IP number and the actual admission date/time, both entered at the desk.
   const [ipNumber, setIpNumber] = useState("");
   const [admittedAt, setAdmittedAt] = useState(nowLocalInput);
+  // Live duplicate check of the typed IP ID: "idle" (empty), "checking", "available", "taken" or "unknown" (check failed;
+  // the server still refuses a duplicate when admitting).
+  const [ipCheck, setIpCheck] = useState<{ state: "idle" | "checking" | "available" | "taken" | "unknown"; patientId?: string }>({ state: "idle" });
   const [notes, setNotes] = useState("");
   // Who pays for this stay -- prefilled from the patient's insurance on record.
   const [payer, setPayer] = useState<AdmissionPayer>(EMPTY_PAYER);
@@ -124,6 +127,30 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
   // Confirmed admission record, for the confirmation panel / slip printing
   const [admittedRecord, setAdmittedRecord] = useState<any>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const value = ipNumber.trim().replace(/\s+/g, " ");
+    if (!value) {
+      setIpCheck({ state: "idle" });
+      return;
+    }
+    setIpCheck({ state: "checking" });
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await apiFetch<{ available: boolean; patient_id?: string }>(
+          `/api/admissions/ip-number-check?ip_number=${encodeURIComponent(value)}`
+        );
+        if (!cancelled) setIpCheck(res.available ? { state: "available" } : { state: "taken", patientId: res.patient_id });
+      } catch {
+        if (!cancelled) setIpCheck({ state: "unknown" });
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [ipNumber]);
 
   const loadBeds = async () => {
     setLoadingBeds(true);
@@ -333,6 +360,10 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
     }
     if (!ipNumber.trim()) {
       setNotice({ type: "warning", message: "Please enter the IP ID for this admission." });
+      return;
+    }
+    if (ipCheck.state === "taken") {
+      setNotice({ type: "warning", message: "This IP ID is already used. Enter a different IP ID." });
       return;
     }
     if (!admittedAt) {
@@ -865,8 +896,20 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
               maxLength={40}
               onChange={(e) => setIpNumber(e.target.value.replace(/\s+/g, " ").trimStart())}
               placeholder="e.g. IP-2026-0123"
-              style={{ height: "42px" }}
+              aria-invalid={ipCheck.state === "taken"}
+              style={{ height: "42px", ...(ipCheck.state === "taken" ? { borderColor: "#dc2626", background: "#fef2f2" } : {}) }}
             />
+            {ipCheck.state === "taken" && (
+              <div style={{ marginTop: "4px", fontSize: "12px", color: "#dc2626", fontWeight: 600 }}>
+                This IP ID is already used{ipCheck.patientId ? ` by ${ipCheck.patientId}` : ""}. Enter a different IP ID.
+              </div>
+            )}
+            {ipCheck.state === "available" && (
+              <div style={{ marginTop: "4px", fontSize: "12px", color: "#16a34a", fontWeight: 600 }}>✓ IP ID is available</div>
+            )}
+            {ipCheck.state === "checking" && (
+              <div style={{ marginTop: "4px", fontSize: "12px", color: "#64748b" }}>Checking…</div>
+            )}
           </div>
           <div>
             <Label>Admission Date &amp; Time <span style={{ color: "#ef4444" }}>*</span></Label>
@@ -1024,7 +1067,7 @@ export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props)
             <Button
               type="button"
               variant="primary"
-              disabled={submitting}
+              disabled={submitting || ipCheck.state === "taken"}
               onClick={() => void handleCompleteAdmission()}
               style={{
                 background: "#2563eb",

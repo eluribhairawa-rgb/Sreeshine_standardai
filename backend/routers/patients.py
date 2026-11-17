@@ -476,6 +476,26 @@ def admissions_list(patient_id: str, db: Session = Depends(get_db), user: dict =
     return {"admissions": rows_to_dicts(lq.get_admissions(db, patient_id, hospital_id=hospital_id))}
 
 
+@router.get("/admissions/ip-number-check")
+def admission_ip_number_check(ip_number: str = "", db: Session = Depends(get_db),
+                              user: dict = Depends(require_permissions("patients.read")),
+                              hospital_id: int = Depends(current_hospital_id)):
+    """Live duplicate check for the IP ID typed on the IP Admission form (case-insensitive, per hospital)."""
+    value = " ".join(str(ip_number or "").split())
+    if not value:
+        return {"ip_number": "", "available": False}
+    with legacy_sql.get_connection(db) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, patient_id FROM admissions WHERE hospital_id = ? AND LOWER(ip_number) = LOWER(?) LIMIT 1",
+            (hospital_id, value),
+        )
+        row = cursor.fetchone()
+    if row:
+        return {"ip_number": value, "available": False, "admission_id": row["id"], "patient_id": row["patient_id"]}
+    return {"ip_number": value, "available": True}
+
+
 @router.put("/admissions/{admission_id}/payer")
 def admission_payer_update(admission_id: int, request: Request, payload: dict = Body(...), db: Session = Depends(get_db),
                            user: dict = Depends(require_permissions("patients.write")), hospital_id: int = Depends(current_hospital_id)):
