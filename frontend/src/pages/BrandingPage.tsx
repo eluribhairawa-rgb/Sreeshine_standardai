@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Textarea } from "../components/ui";
 import { API_BASE } from "../lib/constants";
@@ -35,15 +35,14 @@ export default function BrandingPage({ setNotice }: Props) {
   // ---- watermarks (per module) ----
   const [wmList, setWmList] = useState<Watermark[]>([]);
   const [wmModules, setWmModules] = useState<{ id: string; label: string }[]>([]);
-  const [wmName, setWmName] = useState("");
-  const [wmFile, setWmFile] = useState<File | null>(null);
-  const [wmSelected, setWmSelected] = useState<string[]>([]);
-  const [wmOpacity, setWmOpacity] = useState(12); // percent
-  const [wmScale, setWmScale] = useState(60);
+  // Watermarks picked but not saved yet: each gets its own card to choose its modules.
+  type WmDraft = { key: string; file: File; url: string; name: string; modules: string[]; opacity: number; scale: number };
+  const [drafts, setDrafts] = useState<WmDraft[]>([]);
   const [wmEditing, setWmEditing] = useState<number | null>(null);
   const wmInput = useRef<HTMLInputElement>(null);
-  const wmPreview = useMemo(() => (wmFile ? URL.createObjectURL(wmFile) : ""), [wmFile]);
-  useEffect(() => () => { if (wmPreview) URL.revokeObjectURL(wmPreview); }, [wmPreview]);
+  const draftsRef = useRef<WmDraft[]>([]);
+  draftsRef.current = drafts;
+  useEffect(() => () => { draftsRef.current.forEach((d) => URL.revokeObjectURL(d.url)); }, []);
   // Which watermark the live preview page shows: "auto" (the one being added, else the first saved), "none", or a saved id.
   const [previewWm, setPreviewWm] = useState<string>("auto");
 
@@ -159,28 +158,51 @@ export default function BrandingPage({ setNotice }: Props) {
   // Modules already carrying another active watermark are disabled so the choice is never ambiguous.
   const takenBy = (id: string, exceptId: number | null) => wmList.find((w) => w.active && w.id !== exceptId && w.modules.includes(id));
 
-  const addWatermark = async () => {
-    if (!wmName.trim()) return setError("Give the watermark a name.");
-    if (!wmFile) return setError("Choose a watermark image (PNG or JPG).");
-    if (!wmSelected.length) return setError("Choose at least one module for this watermark.");
+  const addDraftFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    const added: WmDraft[] = Array.from(files).map((file, i) => ({
+      key: `${Date.now()}-${i}-${file.name}`, file, url: URL.createObjectURL(file),
+      name: file.name.replace(/\.[^.]+$/, "").slice(0, 100), modules: [], opacity: 12, scale: 40,
+    }));
+    setDrafts((cur) => [...cur, ...added]);
+    setPreviewWm(`draft:${added[0].key}`);
+    setError("");
+  };
+  const patchDraft = (key: string, patch: Partial<WmDraft>) => setDrafts((cur) => cur.map((d) => (d.key === key ? { ...d, ...patch } : d)));
+  const removeDraft = (key: string) => setDrafts((cur) => { cur.filter((d) => d.key === key).forEach((d) => URL.revokeObjectURL(d.url)); return cur.filter((d) => d.key !== key); });
+  // A module is unavailable to a draft when a saved active watermark, or another draft in this batch, already has it.
+  const draftTakenBy = (id: string, key: string) =>
+    takenBy(id, null) || (() => { const o = drafts.find((d) => d.key !== key && d.modules.includes(id)); return o ? { name: o.name || "another new watermark" } : undefined; })();
+
+  const saveDrafts = async () => {
+    for (const d of drafts) {
+      if (!d.name.trim()) return setError("Give every watermark a name.");
+      if (!d.modules.length) return setError(`Choose at least one module for "${d.name || d.file.name}".`);
+    }
     setBusy("wm-add");
     setError("");
+    let saved = 0;
     try {
-      const body = new FormData();
-      body.append("file", wmFile);
-      body.append("name", wmName.trim());
-      body.append("modules", wmSelected.join(","));
-      body.append("opacity", String(wmOpacity / 100));
-      body.append("scale_pct", String(wmScale));
-      const response = await fetch(`${baseUrl}/api/branding/watermarks`, { method: "POST", body, credentials: "include", headers: { "X-Hospital-Code": getHospitalCode() } });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : data?.error || "Upload failed.");
-      applyWm(data);
+      for (const d of drafts) {
+        const body = new FormData();
+        body.append("file", d.file);
+        body.append("name", d.name.trim());
+        body.append("modules", d.modules.join(","));
+        body.append("opacity", String(d.opacity / 100));
+        body.append("scale_pct", String(d.scale));
+        const response = await fetch(`${baseUrl}/api/branding/watermarks`, { method: "POST", body, credentials: "include", headers: { "X-Hospital-Code": getHospitalCode() } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`${d.name}: ${typeof data?.detail === "string" ? data.detail : data?.error || "Upload failed."}`);
+        applyWm(data);
+        removeDraft(d.key);
+        saved += 1;
+      }
       await refreshGlobal();
-      setWmName(""); setWmFile(null); setWmSelected([]); setWmOpacity(12); setWmScale(60);
-      setNotice({ type: "success", message: "Watermark added. It now prints on the chosen modules' PDFs." });
+      setPreviewWm("auto");
+      setNotice({ type: "success", message: `${saved} watermark${saved === 1 ? "" : "s"} added. They now print on the chosen modules' PDFs.` });
     } catch (e) {
       setError((e as Error).message);
+      if (saved) await refreshGlobal();
     } finally {
       setBusy("");
     }
@@ -279,15 +301,15 @@ export default function BrandingPage({ setNotice }: Props) {
     <img src={logoSrc} alt="Logo preview" style={{ width: lw * PX_PER_MM, height: lh * PX_PER_MM, objectFit: "contain", position: "relative", left: ox * PX_PER_MM, top: oy * PX_PER_MM, display: "block" }} />
   ) : null;
 
-  const draftWm = wmFile && wmPreview ? { src: wmPreview, opacity: wmOpacity / 100, scale: wmScale, label: `New: ${wmName.trim() || wmFile.name}`, modules: wmSelected } : null;
+  const draftToPreview = (d: WmDraft) => ({ src: d.url, opacity: d.opacity / 100, scale: d.scale, label: `New: ${d.name || d.file.name}`, modules: d.modules });
   const savedWm = (w: Watermark) => ({ src: w.image_url ? `${baseUrl}${w.image_url}` : "", opacity: w.opacity, scale: w.scale_pct, label: w.name, modules: w.modules });
   const shownWm = previewWm === "none"
     ? null
     : previewWm === "auto"
-      ? (draftWm || (wmList[0] ? savedWm(wmList[0]) : null))
-      : previewWm === "draft"
-        ? draftWm
-        : (wmList.find((w) => String(w.id) === previewWm) ? savedWm(wmList.find((w) => String(w.id) === previewWm)!) : null);
+      ? (drafts[0] ? draftToPreview(drafts[0]) : (wmList[0] ? savedWm(wmList[0]) : null))
+      : previewWm.startsWith("draft:")
+        ? (() => { const d = drafts.find((x) => x.key === previewWm.slice(6)); return d ? draftToPreview(d) : null; })()
+        : (() => { const w = wmList.find((x) => String(x.id) === previewWm); return w ? savedWm(w) : null; })();
 
   if (!cfg) {
     return <div className="panel"><p className="muted">{error || "Loading branding settings…"}</p></div>;
@@ -434,18 +456,56 @@ export default function BrandingPage({ setNotice }: Props) {
         <section style={section}>
           <h3 style={{ margin: "0 0 4px" }}>Watermarks</h3>
           <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
-            Add a different watermark for each module. It is printed faintly behind the content on every page of that module's PDFs and prints. A module can have one watermark.
+            Upload one or more watermark images, then choose the modules each one is used on. It is printed faintly behind the content on every page of those modules' PDFs and prints. A module has one watermark.
           </p>
 
+          <div style={{ border: "1px dashed #94a3b8", borderRadius: 10, padding: 12, background: "#f8fafc" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <Button variant="primary" size="sm" disabled={!!busy} onClick={() => wmInput.current?.click()}>Upload watermark(s)</Button>
+              <span className="muted" style={{ fontSize: 12 }}>PNG or JPG, up to 5 MB each. You can choose several at once.</span>
+              <input ref={wmInput} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" hidden onChange={(e) => { addDraftFiles(e.target.files); e.target.value = ""; }} />
+            </div>
+
+            {drafts.length > 0 && (
+              <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                {drafts.map((d, idx) => (
+                  <div key={d.key} style={{ border: "1px solid #cbd5e1", borderRadius: 10, padding: 12, background: "#fff" }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
+                      <img src={d.url} alt="" onClick={() => setPreviewWm(`draft:${d.key}`)} style={{ width: 56, height: 56, objectFit: "contain", border: "1px solid #e2e8f0", borderRadius: 8, background: "#fff", cursor: "pointer", flexShrink: 0 }} />
+                      <label style={{ flex: 1, fontSize: 12 }}>Watermark {idx + 1} name
+                        <Input value={d.name} maxLength={100} onChange={(e) => patchDraft(d.key, { name: e.target.value })} />
+                      </label>
+                      <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => removeDraft(d.key)}>Remove</Button>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Which modules should use this watermark?</div>
+                    <ModulePicker modules={wmModules} selected={d.modules} takenBy={(id) => draftTakenBy(id, d.key)} onToggle={(id) => patchDraft(d.key, { modules: d.modules.includes(id) ? d.modules.filter((m) => m !== id) : [...d.modules, id] })} />
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10 }}>
+                      <label style={{ flex: 1, minWidth: 180, fontSize: 12 }}>Opacity: {d.opacity}%
+                        <input type="range" min={3} max={60} value={d.opacity} onChange={(e) => patchDraft(d.key, { opacity: Number(e.target.value) })} style={{ width: "100%" }} />
+                      </label>
+                      <label style={{ flex: 1, minWidth: 180, fontSize: 12 }}>Size: {d.scale}% of page width
+                        <input type="range" min={20} max={100} step={5} value={d.scale} onChange={(e) => patchDraft(d.key, { scale: Number(e.target.value) })} style={{ width: "100%" }} />
+                      </label>
+                    </div>
+                  </div>
+                ))}
+                <div>
+                  <Button variant="primary" disabled={!!busy} onClick={saveDrafts}>{busy === "wm-add" ? "Saving…" : drafts.length > 1 ? `Save ${drafts.length} watermarks` : "Save watermark"}</Button>
+                </div>
+              </div>
+            )}
+          </div>
+
           {wmList.length > 0 && (
-            <div style={{ display: "grid", gap: 10, marginBottom: 14 }}>
+            <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
+              <div style={{ fontWeight: 700 }}>Saved watermarks</div>
               {wmList.map((wm) => {
                 const editing = wmEditing === wm.id;
                 const rowBusy = busy === `wm-${wm.id}`;
                 return (
                   <div key={wm.id} style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, opacity: wm.active ? 1 : 0.6 }}>
                     <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                      <div style={{ width: 64, height: 64, flexShrink: 0, border: "1px solid #e2e8f0", borderRadius: 8, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                      <div onClick={() => setPreviewWm(String(wm.id))} title="Show in the live preview" style={{ width: 64, height: 64, flexShrink: 0, border: "1px solid #e2e8f0", borderRadius: 8, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", cursor: "pointer" }}>
                         {wm.image_url && <img src={`${baseUrl}${wm.image_url}`} alt={wm.name} style={{ maxWidth: "100%", maxHeight: "100%", opacity: Math.max(wm.opacity, 0.35) }} />}
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -458,7 +518,7 @@ export default function BrandingPage({ setNotice }: Props) {
                         <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>Opacity {Math.round(wm.opacity * 100)}% · Size {wm.scale_pct}% of page width</div>
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <Button size="sm" variant="secondary" disabled={rowBusy} onClick={() => setWmEditing(editing ? null : wm.id)}>{editing ? "Close" : "Edit"}</Button>
+                        <Button size="sm" variant="secondary" disabled={rowBusy} onClick={() => setWmEditing(editing ? null : wm.id)}>{editing ? "Close" : "Edit modules"}</Button>
                         <Button size="sm" variant="ghost" disabled={rowBusy} onClick={() => deleteWatermark(wm)}>Delete</Button>
                       </div>
                     </div>
@@ -474,39 +534,6 @@ export default function BrandingPage({ setNotice }: Props) {
               })}
             </div>
           )}
-
-          <div style={{ border: "1px dashed #94a3b8", borderRadius: 10, padding: 12, background: "#f8fafc" }}>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>Add a watermark</div>
-            <div style={{ display: "grid", gap: 10 }}>
-              <label style={{ fontSize: 12 }}>Name
-                <Input value={wmName} maxLength={100} onChange={(e) => setWmName(e.target.value)} placeholder="e.g. Pharmacy confidential" />
-              </label>
-              <div>
-                <div style={{ fontSize: 12, marginBottom: 4 }}>Image (PNG or JPG, up to 5 MB)</div>
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <Button size="sm" variant="secondary" onClick={() => wmInput.current?.click()}>{wmFile ? "Change image" : "Choose image"}</Button>
-                  <span className="muted" style={{ fontSize: 12 }}>{wmFile ? wmFile.name : "No image chosen"}</span>
-                  {wmPreview && <img src={wmPreview} alt="Watermark preview" style={{ height: 40, opacity: Math.max(wmOpacity / 100, 0.35) }} />}
-                </div>
-                <input ref={wmInput} type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" hidden onChange={(e) => { setWmFile(e.target.files?.[0] || null); e.target.value = ""; }} />
-              </div>
-              <div>
-                <div style={{ fontSize: 12, marginBottom: 4 }}>Use on these modules</div>
-                <ModulePicker modules={wmModules} selected={wmSelected} takenBy={(id) => takenBy(id, null)} onToggle={(id) => setWmSelected((cur) => toggleModule(cur, id))} />
-              </div>
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                <label style={{ flex: 1, minWidth: 180, fontSize: 12 }}>Opacity: {wmOpacity}%
-                  <input type="range" min={3} max={60} value={wmOpacity} onChange={(e) => setWmOpacity(Number(e.target.value))} style={{ width: "100%" }} />
-                </label>
-                <label style={{ flex: 1, minWidth: 180, fontSize: 12 }}>Size: {wmScale}% of page width
-                  <input type="range" min={20} max={100} step={5} value={wmScale} onChange={(e) => setWmScale(Number(e.target.value))} style={{ width: "100%" }} />
-                </label>
-              </div>
-              <div>
-                <Button variant="primary" disabled={!!busy} onClick={addWatermark}>{busy === "wm-add" ? "Adding…" : "Add watermark"}</Button>
-              </div>
-            </div>
-          </div>
         </section>
 
         <div style={{ display: "flex", gap: 10 }}>
@@ -523,7 +550,7 @@ export default function BrandingPage({ setNotice }: Props) {
               <select value={previewWm} onChange={(e) => setPreviewWm(e.target.value)} style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #cbd5e1", fontSize: 12, maxWidth: 190 }}>
                 <option value="auto">Auto</option>
                 <option value="none">None</option>
-                {draftWm && <option value="draft">{draftWm.label}</option>}
+                {drafts.map((d) => <option key={d.key} value={`draft:${d.key}`}>{`New: ${d.name || d.file.name}`}</option>)}
                 {wmList.map((w) => <option key={w.id} value={String(w.id)}>{w.name}</option>)}
               </select>
             </label>
