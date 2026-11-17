@@ -1207,14 +1207,13 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
         body { font-family: Arial, Helvetica, sans-serif; color: #0f172a; font-size: 12.5px; }
         .head { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 24px; border: 1.5px solid #00828a; border-radius: 6px; padding: 10px 14px; }
         .f { display: flex; gap: 6px; } .l { color: #475569; font-weight: 700; min-width: 92px; } .v { font-weight: 700; }
-        .sym { font-family: "Times New Roman", Georgia, serif; font-size: 40px; font-weight: 700; color: #00828a; margin: 12px 0 4px; line-height: 1; }
+
         h3 { font-size: 13px; margin: 14px 0 6px; color: #00828a; text-transform: uppercase; letter-spacing: .03em; }
         table.meds { width: 100%; border-collapse: collapse; }
         table.meds th, table.meds td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top; }
         table.meds th { background: #f1f5f9; }
         p { margin: 0; white-space: pre-wrap; }
-        .sign { display: flex; justify-content: flex-end; margin-top: 24mm; }
-        .sign div { border-top: 1px solid #334155; padding-top: 4px; min-width: 60mm; text-align: center; font-weight: 700; }
+
       </style></head><body>
       <!-- Keep the hospital header (logo row); data-hospai-print-hide-report-row drops only the title / address / print-date row. -->
       <div class="head" data-hospai-print-hide-report-row>
@@ -1226,7 +1225,6 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
         ${row("Department", esc(rx.department))}
       </div>
       ${opt(rx.diagnosis) ? `<h3>Diagnosis</h3><p>${esc(rx.diagnosis)}</p>` : ""}
-      <div class="sym">&#8478;</div>
       ${meds.length ? `<table class="meds"><thead><tr><th>#</th><th>Medicine</th><th>Dosage</th><th>Frequency</th><th>Duration</th><th>Instructions</th></tr></thead><tbody>
         ${meds.map((m, i) => `<tr><td>${i + 1}</td><td><b>${esc(m.medicine_name)}</b></td><td>${esc(m.dosage)}</td><td>${esc(m.frequency)}</td><td>${esc(m.duration)}</td><td>${esc(m.instructions)}</td></tr>`).join("")}
       </tbody></table>` : `<p>No medicines prescribed.</p>`}
@@ -1234,7 +1232,6 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
       ${labs.length ? `<h3>Lab Values</h3><p>${labs.map(([k, v]) => `${k}: ${esc(v)}`).join(" &nbsp;|&nbsp; ")}</p>` : ""}
       ${opt(rx.advice) ? `<h3>Advice</h3><p>${esc(rx.advice)}</p>` : ""}
       ${opt(rx.follow_up_date) ? `<h3>Follow-up</h3><p>${esc(new Date(rx.follow_up_date).toLocaleDateString("en-GB"))}</p>` : ""}
-      <div class="sign"><div>Doctor's Signature<br/><span style="font-weight:400">${esc(rx.doctor_name)}</span></div></div>
       </body></html>`;
     printViaIframe(html);
   };
@@ -1848,12 +1845,22 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
             top: 0;
             width: 100% !important;
             max-width: 100% !important;
+            min-height: 262mm !important;
             margin: 0 !important;
             padding: 24px !important;
             box-shadow: none !important;
             border: none !important;
+            border-radius: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
+          }
+          .rx-sheet-meds-box {
+            flex: 1 !important;
+          }
+          .rx-sheet-signature-block {
+            margin-top: auto !important;
           }
           .doctor-rx-top-header,
           .doctor-rx-queue-section,
@@ -1865,6 +1872,9 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
             display: none !important;
           }
           ${buildHospaiPrintFooterCss()}
+          @page { margin-top: 10mm; }
+          .doctor-rx-sheet { box-sizing: border-box !important; }
+          .rx-sheet-table tr, .rx-sheet-signature-block, .rx-sheet-footer { page-break-inside: avoid; }
         }
       `}</style>
 
@@ -3296,7 +3306,7 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
             <div className="doctor-rx-meds-header">
               <div>
                 <h3 className="meds-title" style={{ margin: 0 }}>
-                  Prescribed Medicines (℞)
+                  Prescribed Medicines
                 </h3>
                 <span style={{ fontSize: "12px", color: "#64748b" }}>
                   Add medicine names, dosage, frequency, duration and timing instructions.
@@ -3891,9 +3901,6 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
               </div>
             ) : null}
 
-            {/* Rx Symbol */}
-            <div className="rx-sheet-symbol">℞</div>
-
             {/* Medicines Box */}
             <div className="rx-sheet-meds-box">
               <table className="rx-sheet-table">
@@ -3980,7 +3987,6 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", gap: "12px", flexWrap: "wrap" }}>
             <div>
               <h3 style={{ margin: 0, fontSize: "16px", color: "#0f172a" }}>
-                <span style={{ fontFamily: "'Times New Roman', Georgia, serif", color: "#00828a", marginRight: "6px" }}>℞</span>
                 Previous Prescriptions
               </h3>
               <span style={{ fontSize: "12px", color: "#64748b" }}>

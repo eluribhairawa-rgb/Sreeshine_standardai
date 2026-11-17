@@ -411,6 +411,7 @@ export default function PatientsPage({
     const printDate = new Date().toLocaleDateString("en-GB");
     const printTime = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
 
+    const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const rows = list.map((p, i) => {
       const name = [p.name, p.middle_name, p.last_name].filter(Boolean).join(" ") || "-";
       const phone = p.phone || "-";
@@ -420,11 +421,11 @@ export default function PatientsPage({
       const created = p.created_at ? formatDate(p.created_at) : "-";
       return `<tr>
         <td>${i + 1}</td>
-        <td>${uid}</td>
-        <td>${name.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</td>
-        <td>${age}</td>
-        <td>${gender}</td>
-        <td>${phone}</td>
+        <td>${esc(uid)}</td>
+        <td>${esc(name)}</td>
+        <td>${esc(String(age))}</td>
+        <td>${esc(gender)}</td>
+        <td>${esc(phone)}</td>
         <td>${created}</td>
       </tr>`;
     }).join("");
@@ -435,22 +436,20 @@ export default function PatientsPage({
   <meta charset="utf-8" />
   <title>Patient List – ${displayDate}</title>
   <style>
-    @page { size: A4 portrait; margin: 15mm 10mm 20mm; }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #000; }
-    h2 { font-size: 13pt; margin: 0 0 1mm; }
-    .sub { font-size: 8.5pt; color: #555; margin: 0 0 4mm; }
-    table { width: 100%; border-collapse: collapse; margin-top: 4mm; }
+    body { font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #000; }
+    .sub { font-size: 10pt; font-weight: 700; color: #111; margin: 0 0 3mm; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th:nth-child(1), td:nth-child(1) { width: 9mm; text-align: center; }
+    td { word-break: break-word; }
     th { background: #f1f5f9; font-weight: 700; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.03em; padding: 2.5mm 2mm; border: 0.3mm solid #ccc; }
     td { padding: 2mm 2mm; border: 0.3mm solid #ddd; vertical-align: top; }
     tr:nth-child(even) td { background: #f8fafc; }
-    .count { font-size: 8pt; color: #555; margin-top: 2mm; }
+    .count { font-size: 9pt; font-weight: 700; margin-top: 3mm; }
     .no-patients { text-align: center; padding: 8mm; color: #888; font-size: 10pt; }
   </style>
 </head>
 <body>
-  <h2>Patient List – ${displayDate}</h2>
-  <p class="sub">Registered on ${displayDate} &nbsp;|&nbsp; Total: ${list.length} patient${list.length === 1 ? "" : "s"}</p>
+  <p class="sub">Patients registered on ${displayDate} &nbsp;|&nbsp; Total: ${list.length} patient${list.length === 1 ? "" : "s"}</p>
   ${list.length === 0
     ? `<p class="no-patients">No patients registered on ${displayDate}.</p>`
     : `<table>

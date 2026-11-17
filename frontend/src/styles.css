@@ -11767,6 +11767,7 @@ body {
 }
 
 .rx-sheet-meds-box {
+  flex: 1;
   margin: 6px 0 14px;
   border: 1.5px solid #102a43;
 }
@@ -11820,6 +11821,28 @@ body {
   margin-top: auto;
   padding-top: 24px;
   text-align: right;
+}
+
+@media print {
+  .doctor-rx-sheet {
+    min-height: 262mm !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+  }
+  .rx-sheet-meds-box {
+    flex: 1 !important;
+  }
+  .rx-sheet-signature-block {
+    margin-top: auto !important;
+    page-break-inside: avoid;
+  }
+  .rx-sheet-footer {
+    page-break-inside: avoid;
+  }
 }
 
 .sig-name {
