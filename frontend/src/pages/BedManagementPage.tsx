@@ -73,6 +73,28 @@ function advanceFigures(preview: { grand_total: number; advance_available?: numb
   return { avail, applied, excess: Math.max(0, Math.round((avail - applied) * 100) / 100) };
 }
 
+/** A ward / specialty unit offered in "Add & Expand Hospital Beds", with the defaults it pre-fills. */
+type WardOption = { name: string; label: string; bed_type: string; daily_rate: string };
+
+const DEFAULT_WARD_OPTIONS: WardOption[] = [
+  { name: "ICU", label: "ICU (Intensive Care Unit)", bed_type: "Critical Care", daily_rate: "3500" },
+  { name: "General Ward", label: "General Ward", bed_type: "Standard Ward", daily_rate: "800" },
+  { name: "Single Room", label: "Single Room (Deluxe Private)", bed_type: "Deluxe Private", daily_rate: "2000" },
+  { name: "NICU", label: "NICU (Neonatal ICU)", bed_type: "Standard Ward", daily_rate: "800" },
+  { name: "Emergency Ward", label: "Emergency Ward", bed_type: "Standard Ward", daily_rate: "800" },
+];
+const WARD_OPTIONS_KEY = "hospai_ward_options_v1";
+type StoredWardOptions = { custom: WardOption[]; hidden: string[] };
+
+function loadWardOptions(): StoredWardOptions {
+  try {
+    const raw = localStorage.getItem(WARD_OPTIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && Array.isArray(parsed.custom) && Array.isArray(parsed.hidden)) return parsed;
+  } catch { /* storage unavailable */ }
+  return { custom: [], hidden: [] };
+}
+
 export default function BedManagementPage({ setNotice, onNavigate }: Props) {
   const [beds, setBeds] = useState<HospitalBed[]>([]);
   const [summary, setSummary] = useState<BedSummary>({ total: 15, occupied: 0, available: 15, occupancy_rate: 0 });
@@ -108,6 +130,14 @@ export default function BedManagementPage({ setNotice, onNavigate }: Props) {
     notes: "Equipped with oxygen & semi-fowler controls",
   });
   const [addingBed, setAddingBed] = useState(false);
+  // Manageable ward / specialty unit list (kept in this browser, like the admission types).
+  const [wardStore, setWardStore] = useState<StoredWardOptions>(loadWardOptions);
+  const [manageWardsOpen, setManageWardsOpen] = useState(false);
+  const [newWard, setNewWard] = useState({ name: "", bed_type: "Standard Ward", daily_rate: "800" });
+  const saveWardStore = (next: StoredWardOptions) => {
+    setWardStore(next);
+    try { localStorage.setItem(WARD_OPTIONS_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+  };
 
   // 3. Bed Details / Quick Action Modal
   const [viewBed, setViewBed] = useState<HospitalBed | null>(null);
@@ -458,6 +488,54 @@ export default function BedManagementPage({ setNotice, onNavigate }: Props) {
   });
 
   // Group filtered beds by ward for structured ward displays
+  // Ward options = built-in (unless removed) + added ones + any ward that already has beds.
+  const wardsInUse = new Set(beds.map((b) => b.ward).filter(Boolean));
+  const wardOptions: WardOption[] = [
+    ...DEFAULT_WARD_OPTIONS.filter((w) => !wardStore.hidden.includes(w.name)),
+    ...wardStore.custom,
+  ];
+  wardsInUse.forEach((name) => {
+    if (!wardOptions.some((w) => w.name.toLowerCase() === name.toLowerCase())) {
+      wardOptions.push({ name, label: name, bed_type: "Standard Ward", daily_rate: "800" });
+    }
+  });
+  const addWardOption = () => {
+    const name = newWard.name.trim().replace(/\s+/g, " ");
+    if (!name) {
+      setNotice({ type: "warning", message: "Enter a ward / specialty unit name." });
+      return;
+    }
+    if (name.toLowerCase() === "other") {
+      setNotice({ type: "warning", message: `"Other" is reserved for one-off custom wards.` });
+      return;
+    }
+    if (wardOptions.some((w) => w.name.toLowerCase() === name.toLowerCase())) {
+      setNotice({ type: "warning", message: `"${name}" is already in the list.` });
+      return;
+    }
+    const builtIn = DEFAULT_WARD_OPTIONS.find((w) => w.name.toLowerCase() === name.toLowerCase());
+    if (builtIn) {
+      saveWardStore({ ...wardStore, hidden: wardStore.hidden.filter((h) => h !== builtIn.name) });
+    } else {
+      const rate = String(Math.max(0, Number(newWard.daily_rate) || 0));
+      saveWardStore({ ...wardStore, custom: [...wardStore.custom, { name, label: name, bed_type: newWard.bed_type.trim() || "Standard Ward", daily_rate: rate }] });
+    }
+    setNewWard({ name: "", bed_type: "Standard Ward", daily_rate: "800" });
+    setNotice({ type: "success", message: `Added "${name}" to the ward list.` });
+  };
+  const removeWardOption = (w: WardOption) => {
+    if (wardsInUse.has(w.name)) {
+      setNotice({ type: "warning", message: `"${w.name}" already has beds, so it stays in the list.` });
+      return;
+    }
+    const isBuiltIn = DEFAULT_WARD_OPTIONS.some((d) => d.name === w.name);
+    saveWardStore(isBuiltIn
+      ? { ...wardStore, hidden: [...wardStore.hidden, w.name] }
+      : { ...wardStore, custom: wardStore.custom.filter((c) => c.name !== w.name) });
+    if (addBedForm.ward === w.name) setAddBedForm((p) => ({ ...p, ward: "Other" }));
+    setNotice({ type: "info", message: `Removed "${w.name}" from the ward list.` });
+  };
+
   const wardGroups: Record<string, HospitalBed[]> = {};
   filteredBeds.forEach((bed) => {
     if (!wardGroups[bed.ward]) {
@@ -1241,6 +1319,80 @@ export default function BedManagementPage({ setNotice, onNavigate }: Props) {
         </div>
       </Modal>
 
+      {/* Manage Ward / Specialty Units */}
+      <Modal
+        open={manageWardsOpen}
+        onClose={() => setManageWardsOpen(false)}
+        title="Manage Ward / Specialty Units"
+        description="These options appear in Ward / Specialty Unit when adding beds. Each keeps the bed type and daily rate it pre-fills."
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1.4fr 1fr auto", gap: "8px", alignItems: "end", marginBottom: "14px" }}>
+          <div>
+            <Label>Ward / unit name</Label>
+            <Input
+              value={newWard.name}
+              onChange={(e) => setNewWard((p) => ({ ...p, name: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addWardOption(); } }}
+              placeholder="e.g. Post-Op Recovery"
+            />
+          </div>
+          <div>
+            <Label>Default bed type</Label>
+            <Input value={newWard.bed_type} onChange={(e) => setNewWard((p) => ({ ...p, bed_type: e.target.value }))} placeholder="Standard Ward" />
+          </div>
+          <div>
+            <Label>Rate / day (₹)</Label>
+            <Input
+              type="text"
+              inputMode="decimal"
+              value={newWard.daily_rate}
+              onChange={(e) => setNewWard((p) => ({ ...p, daily_rate: e.target.value.replace(/[^0-9.]/g, "") }))}
+            />
+          </div>
+          <Button type="button" variant="primary" onClick={addWardOption}>+ Add</Button>
+        </div>
+
+        <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e2e8f0", borderRadius: "8px" }}>
+          {wardOptions.map((w) => {
+            const inUse = wardsInUse.has(w.name);
+            return (
+              <div key={w.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", padding: "8px 12px", borderBottom: "1px solid #f1f5f9", fontSize: "13px" }}>
+                <div>
+                  <div style={{ fontWeight: 700, color: "#0f172a" }}>{w.label}</div>
+                  <div style={{ fontSize: "11.5px", color: "#64748b" }}>
+                    {w.bed_type} · ₹{w.daily_rate}/day{inUse ? " · has beds" : ""}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeWardOption(w)}
+                  disabled={inUse}
+                  title={inUse ? "This ward already has beds" : "Remove from the list"}
+                  style={{ background: "none", border: "1px solid #fecaca", color: inUse ? "#cbd5e1" : "#dc2626", borderColor: inUse ? "#e2e8f0" : "#fecaca", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", cursor: inUse ? "not-allowed" : "pointer" }}
+                >
+                  Remove
+                </button>
+              </div>
+            );
+          })}
+          {wardOptions.length === 0 && (
+            <div style={{ padding: "16px", textAlign: "center", color: "#64748b", fontSize: "13px" }}>No wards in the list. Add one above.</div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14px" }}>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => { saveWardStore({ custom: wardStore.custom, hidden: [] }); setNotice({ type: "info", message: "Built-in wards restored." }); }}
+            disabled={wardStore.hidden.length === 0}
+          >
+            Restore built-in wards
+          </Button>
+          <Button type="button" variant="primary" onClick={() => setManageWardsOpen(false)}>Done</Button>
+        </div>
+      </Modal>
+
       {/* ========================================================================= */}
       {/* MODAL 2: ADD / EXPAND MORE BEDS MODAL */}
       {/* ========================================================================= */}
@@ -1253,28 +1405,40 @@ export default function BedManagementPage({ setNotice, onNavigate }: Props) {
       >
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginBottom: "14px" }}>
           <div>
-            <Label>
-              Ward / Specialty Unit <span style={{ color: "#ef4444" }}>*</span>
-            </Label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <Label>
+                Ward / Specialty Unit <span style={{ color: "#ef4444" }}>*</span>
+              </Label>
+              <button
+                type="button"
+                onClick={() => setManageWardsOpen(true)}
+                style={{ background: "none", border: "none", color: "#00828a", fontSize: "12px", fontWeight: 700, cursor: "pointer", padding: 0 }}
+                title="Add or remove ward / specialty units"
+              >
+                ⚙ Manage
+              </button>
+            </div>
             <select
               value={addBedForm.ward}
               onChange={(e) => {
                 const val = e.target.value;
+                const opt = wardOptions.find((w) => w.name === val);
                 setAddBedForm((p) => ({
                   ...p,
                   ward: val,
-                  bed_type: val === "ICU" ? "Critical Care" : val === "Single Room" ? "Deluxe Private" : "Standard Ward",
-                  daily_rate: val === "ICU" ? "3500" : val === "Single Room" ? "2000" : "800",
+                  bed_type: opt ? opt.bed_type : p.bed_type,
+                  daily_rate: opt ? opt.daily_rate : p.daily_rate,
                 }));
               }}
               className="pharmacy-rx-search-input"
               style={{ height: "38px", width: "100%", padding: "0 10px", fontSize: "13px", borderRadius: "6px", border: "1px solid #cbd5e1" }}
             >
-              <option value="ICU">ICU (Intensive Care Unit)</option>
-              <option value="General Ward">General Ward</option>
-              <option value="Single Room">Single Room (Deluxe Private)</option>
-              <option value="NICU">NICU (Neonatal ICU)</option>
-              <option value="Emergency Ward">Emergency Ward</option>
+              {!wardOptions.some((w) => w.name === addBedForm.ward) && addBedForm.ward !== "Other" && (
+                <option value={addBedForm.ward} disabled>{addBedForm.ward} (removed)</option>
+              )}
+              {wardOptions.map((w) => (
+                <option key={w.name} value={w.name}>{w.label}</option>
+              ))}
               <option value="Other">+ Other / Custom Ward</option>
             </select>
           </div>
