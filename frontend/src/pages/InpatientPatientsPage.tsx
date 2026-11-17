@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { filterPercent, percentOf } from "../lib/format";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Label, Modal, Select } from "../components/ui";
 import { apiFetch, reportError } from "../lib/api";
@@ -57,7 +58,7 @@ type DischargeBillPreview = {
 
 /** Advance on deposit vs this bill: how much is applied, and how much is left over to return. */
 function advanceFigures(preview: { grand_total: number; advance_available?: number }, discountText: string) {
-  const net = Math.max(0, preview.grand_total - (Number(discountText) || 0));
+  const net = Math.max(0, preview.grand_total - percentOf(preview.grand_total, discountText));
   const avail = preview.advance_available || 0;
   const applied = Math.min(avail, net);
   return { avail, applied, excess: Math.max(0, Math.round((avail - applied) * 100) / 100) };
@@ -186,7 +187,7 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
   const confirmDischargeBill = async (bed: OccupiedBed) => {
     if (dischargePreview) {
       const adv = advanceFigures(dischargePreview, dischargeForm.discount);
-      const toCollect = Math.max(0, dischargePreview.grand_total - (Number(dischargeForm.discount) || 0) - adv.applied);
+      const toCollect = Math.max(0, dischargePreview.grand_total - percentOf(dischargePreview.grand_total, dischargeForm.discount) - adv.applied);
       if (toCollect > 0 && !dischargeForm.payment_mode) {
         setNotice({ type: "warning", message: "Please select a payment mode for the balance collected now." });
         return;
@@ -203,7 +204,7 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
         {
           method: "POST",
           body: JSON.stringify({
-            discount: Number(dischargeForm.discount) || 0,
+            discount: dischargePreview ? percentOf(dischargePreview.grand_total, dischargeForm.discount) : 0,
             return_excess: dischargeForm.return_excess,
             refund_method: dischargeForm.refund_method,
             payment_mode: dischargeForm.payment_mode,
@@ -428,19 +429,15 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <div>
-                    <Label>Discount (₹)</Label>
+                    <Label>Discount (%){percentOf(dischargePreview.grand_total, dischargeForm.discount) > 0 ? ` = ₹${percentOf(dischargePreview.grand_total, dischargeForm.discount).toFixed(2)}` : ""}</Label>
                     <Input
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       name="discount"
-                      aria-label="Discount"
-                      min={0}
+                      aria-label="Discount percentage"
+                      placeholder="e.g. 10"
                       value={dischargeForm.discount}
-                      onChange={(e) => {
-                        const cleaned = e.target.value.replace(/[^0-9.]/g, "");
-                        const cap = Math.max(0, Number(dischargePreview?.grand_total) || 0);
-                        const num = parseFloat(cleaned);
-                        setDischargeForm((p) => ({ ...p, discount: !isNaN(num) && num > cap ? String(cap) : cleaned }));
-                      }}
+                      onChange={(e) => setDischargeForm((p) => ({ ...p, discount: filterPercent(e.target.value) }))}
                     />
                   </div>
                   <div>
@@ -510,11 +507,11 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
                     <>
                       Billed to {viewPatient?.insurance_provider || "the insurer"}
                       {viewPatient?.insurance_policy_no ? ` (Policy ${viewPatient.insurance_policy_no})` : ""}:{" "}
-                      <strong>₹{Math.max(0, dischargePreview.grand_total - (Number(dischargeForm.discount) || 0) - advanceFigures(dischargePreview, dischargeForm.discount).applied).toFixed(2)}</strong>.
+                      <strong>₹{Math.max(0, dischargePreview.grand_total - percentOf(dischargePreview.grand_total, dischargeForm.discount) - advanceFigures(dischargePreview, dischargeForm.discount).applied).toFixed(2)}</strong>.
                       Nothing is collected from the patient now; a claim is raised and the insurer's payment is recorded later in Insurance Claims.
                     </>
                   ) : (
-                    <>Amount to collect now: <strong>₹{Math.max(0, dischargePreview.grand_total - (Number(dischargeForm.discount) || 0) - advanceFigures(dischargePreview, dischargeForm.discount).applied).toFixed(2)}</strong>.</>
+                    <>Amount to collect now: <strong>₹{Math.max(0, dischargePreview.grand_total - percentOf(dischargePreview.grand_total, dischargeForm.discount) - advanceFigures(dischargePreview, dischargeForm.discount).applied).toFixed(2)}</strong>.</>
                   )}{" "}
                   Confirming will generate the final invoice, mark this admission discharged, and free the bed.
                 </div>

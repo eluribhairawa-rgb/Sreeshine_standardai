@@ -283,3 +283,17 @@ export const preventNonNumericDiscountKeys = (e: React.KeyboardEvent<HTMLInputEl
     e.preventDefault();
   }
 };
+
+/** Clean a discount-percentage input: numbers only, capped at 100. */
+export const filterPercent = (value: string): string => {
+  const cleaned = filterDecimal(value);
+  const num = parseFloat(cleaned);
+  return !isNaN(num) && num > 100 ? "100" : cleaned;
+};
+
+/** Rupee amount for a percentage of a base value (rounded to paise, never above the base). */
+export const percentOf = (base: number, percent: string | number): number => {
+  const b = Math.max(0, Number(base) || 0);
+  const p = Math.min(Math.max(0, parseFloat(String(percent)) || 0), 100);
+  return Math.min(b, Math.round(b * p) / 100);
+};

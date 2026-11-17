@@ -7,7 +7,7 @@ import MarkdownReport from "../components/MarkdownReport";
 import { Button, Checkbox, Input, Label, Select, Table, TableCell, TableHead, TableRow, Textarea } from "../components/ui";
 import { API_BASE, DOC_TYPES, SUPPORTED_DOCUMENT_ACCEPT, SUPPORTED_DOCUMENT_EXTENSIONS, isSupportedDocumentFile } from "../lib/constants";
 import { apiFetch, reportError } from "../lib/api";
-import { formatDateTimeIST, getISTDateTimeKey, getTimestamp, stripUploadTimestampPrefix, filterInteger, filterDecimal, preventNonNumericDiscountKeys } from "../lib/format";
+import { formatDateTimeIST, getISTDateTimeKey, getTimestamp, stripUploadTimestampPrefix, filterInteger, filterDecimal, filterPercent, percentOf, preventNonNumericDiscountKeys } from "../lib/format";
 import { printViaIframe } from "../lib/printViaIframe";
 import { PRINT_BRAND_HEADER_DATA_URI, PRINT_WATERMARK_DATA_URI } from "../lib/printBrand";
 import type { DocumentItem, Notice, Patient } from "../types";
@@ -158,7 +158,7 @@ export default function ReadmitPage({ onSelect, setNotice, onReadmitComplete, oc
   const [reviewFee, setReviewFee] = useState("");
   const [reviewDiscount, setReviewDiscount] = useState("");
   const reviewFeeNum = Math.max(0, Number(reviewFee) || 0);
-  const reviewDiscountAmt = Math.min(Math.max(0, parseFloat(reviewDiscount) || 0), reviewFeeNum);
+  const reviewDiscountAmt = percentOf(reviewFeeNum, reviewDiscount);
   const reviewNetFee = Math.max(0, reviewFeeNum - reviewDiscountAmt);
   const [paymentMode, setPaymentMode] = useState("");
   const [readmitValidationErrors, setReadmitValidationErrors] = useState<Record<string, string>>({});
@@ -748,7 +748,7 @@ export default function ReadmitPage({ onSelect, setNotice, onReadmitComplete, oc
         doctorName ? `Doctor: ${doctorName}` : "",
         doctorDepartment ? `Department: ${doctorDepartment}` : "",
         `Review Fee: ${reviewFee}`,
-        reviewDiscountAmt > 0 ? `Discount: ${reviewDiscountAmt.toFixed(2)} (Net: ${reviewNetFee.toFixed(2)})` : "",
+        reviewDiscountAmt > 0 ? `Discount: ${reviewDiscount}% = ${reviewDiscountAmt.toFixed(2)} (Net: ${reviewNetFee.toFixed(2)})` : "",
         paymentMode ? `Payment Mode: ${paymentMode}` : ""
       ].filter(Boolean).join(" | ");
       const finalNotes = [additionalNotes, notes ? `[Admission Notes]\n${notes}` : ""].filter(Boolean).join("\n\n");
@@ -1101,21 +1101,17 @@ export default function ReadmitPage({ onSelect, setNotice, onReadmitComplete, oc
                         {readmitValidationErrors.reviewFee && <span className="field-error">{readmitValidationErrors.reviewFee}</span>}
                       </Label>
                       <Label>
-                        <span className="label-text">Discount (₹)</span>
+                        <span className="label-text">Discount (%){reviewDiscountAmt > 0 ? ` = ₹${reviewDiscountAmt.toFixed(2)}` : ""}</span>
                         <Input
                           type="text"
                           inputMode="decimal"
                           name="discount"
-                          aria-label="Discount"
-                          placeholder="e.g. 50"
+                          aria-label="Discount percentage"
+                          placeholder="e.g. 10"
                           disabled={reviewFeeNum <= 0}
                           value={reviewDiscount}
                           onKeyDown={preventNonNumericDiscountKeys}
-                          onChange={(event) => {
-                            const cleaned = filterDecimal(event.target.value);
-                            const num = parseFloat(cleaned);
-                            setReviewDiscount(!isNaN(num) && num > reviewFeeNum ? String(reviewFeeNum) : cleaned);
-                          }}
+                          onChange={(event) => setReviewDiscount(filterPercent(event.target.value))}
                         />
                       </Label>
                       <Label>

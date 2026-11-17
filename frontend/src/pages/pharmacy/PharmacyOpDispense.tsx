@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { filterPercent } from "../../lib/format";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Modal } from "../../components/ui";
 import PatientSearchPicker from "../../components/PatientSearchPicker";
@@ -8,7 +9,7 @@ import type { Notice, Patient } from "../../types";
 import { printViaIframe } from "../../lib/printViaIframe";
 import { buildPrintDocumentHtml, buildPrintLabelsHtml } from "../../lib/printTemplates";
 import { downloadCsv } from "../../lib/csvExport";
-import { printPharmacyInvoiceById } from "../../lib/pharmacyInvoicePrint";
+import { printPharmacyCreditNote, printPharmacyInvoiceById } from "../../lib/pharmacyInvoicePrint";
 import { COUNTRY_CODE_RULES, COUNTRY_CODES, parsePhoneInput, validateMobileByCountry, withCountryCode, splitStoredPhone, toWhatsAppNumber } from "../../lib/phone";
 
 type Props = {
@@ -180,8 +181,8 @@ export default function PharmacyOpDispense({ setNotice, onNavigate }: Props) {
   const [verifyingInsurance, setVerifyingInsurance] = useState(false);
   const isInsuranceSale = dispenseStockSource === "INSURANCE";
 
-  // Bill-level discount (₹ or %), numbers only. Spread across lines so GST is charged on the discounted value.
-  const [discountMode, setDiscountMode] = useState<"amount" | "percent">("amount");
+  // Bill-level discount as a percentage, numbers only. Spread across lines so GST is charged on the discounted value.
+  const discountMode = "percent" as "amount" | "percent";
   const [discountInput, setDiscountInput] = useState<string>("");
 
   // Partial Payment State
@@ -1157,28 +1158,8 @@ export default function PharmacyOpDispense({ setNotice, onNavigate }: Props) {
 
   const handlePrintReturnBill = () => {
     if (!returnBill) return;
-    const b = returnBill;
-    const creditNo = `CN-${String(b.return_id).padStart(6, "0")}`;
     try {
-      printViaIframe(buildPrintDocumentHtml({
-        title: "Pharmacy Return / Refund Bill",
-        subtitleLines: [`Credit Note: ${creditNo}`, b.invoice_no ? `Against Invoice: ${b.invoice_no}` : "", `Date: ${b.date}`],
-        meta: [
-          { label: "Patient UHID", value: b.patient_id || "-" },
-          { label: "Credit Note No.", value: creditNo },
-          { label: "Original Invoice", value: b.invoice_no || "-" },
-          { label: "Refund Mode", value: (b.refund_mode || "cash").toUpperCase() },
-          { label: "Reason", value: b.reason },
-          { label: "Stock Outcome", value: b.stock_status === "released" ? "Restocked" : b.stock_status === "rejected" ? "Written off (damaged)" : "Quarantined" },
-        ],
-        columns: ["Medicine", "Batch", "Returned Qty", "Unit Price", "Refund Value"],
-        rows: [[b.medicine_name, b.batch_no || "-", b.quantity, `₹${Number(b.unit_price).toFixed(2)}`, `₹${Number(b.refund_amount).toFixed(2)}`]],
-        totals: [
-          ...(b.due_cancelled > 0 ? [{ label: "Unpaid balance cancelled", value: `₹${Number(b.due_cancelled).toFixed(2)}` }] : []),
-          { label: "Refunded to customer", value: `₹${Number(b.cash_refunded).toFixed(2)}` },
-          { label: "Total Return Value", value: `₹${Number(b.refund_amount).toFixed(2)}`, grand: true },
-        ],
-      }));
+      printPharmacyCreditNote(returnBill);
     } catch (error) {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to print the return bill." });
     }
@@ -1941,43 +1922,18 @@ export default function PharmacyOpDispense({ setNotice, onNavigate }: Props) {
               {/* Discount (numbers only) */}
               <div style={{ marginBottom: "1rem" }}>
                 <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 700, color: "#334155", marginBottom: "6px" }}>
-                  Discount:
+                  Discount (%):
                 </label>
                 <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                  <div style={{ display: "flex", border: "1px solid #cbd5e1", borderRadius: "8px", overflow: "hidden", flexShrink: 0 }}>
-                    {([["amount", "₹"], ["percent", "%"]] as const).map(([mode, label]) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        disabled={isInsuranceSale}
-                        onClick={() => { setDiscountMode(mode); setDiscountInput(""); }}
-                        style={{
-                          padding: "8px 14px",
-                          border: "none",
-                          cursor: isInsuranceSale ? "not-allowed" : "pointer",
-                          background: discountMode === mode ? "#f0fdfa" : "#ffffff",
-                          color: discountMode === mode ? "#00828a" : "#334155",
-                          fontWeight: discountMode === mode ? 700 : 500,
-                        }}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
                   <Input
                     type="text"
                     inputMode="decimal"
                     name="discount"
-                    aria-label="Discount"
+                    aria-label="Discount percentage"
                     disabled={isInsuranceSale || cart.length === 0}
-                    placeholder={discountMode === "percent" ? "e.g. 10" : "e.g. 50"}
+                    placeholder="e.g. 10"
                     value={discountInput}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      const num = parseFloat(raw);
-                      const cap = discountMode === "percent" ? 100 : discountMax;
-                      setDiscountInput(!isNaN(num) && num > cap ? String(cap) : raw);
-                    }}
+                    onChange={(e) => setDiscountInput(filterPercent(e.target.value))}
                     style={{ fontWeight: 600 }}
                   />
                 </div>

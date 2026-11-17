@@ -91,7 +91,8 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<ServiceTab>("LAB");
   const [lines, setLines] = useState<Line[]>([]);
-  const [discountType, setDiscountType] = useState<"percent" | "flat">("percent");
+  // Discounts are always a percentage of the gross bill.
+  const discountType = "percent" as "percent" | "flat";
   const [discountVal, setDiscountVal] = useState<number | "">("");
   const [priority, setPriority] = useState("Routine");
   const [remarks, setRemarks] = useState("");
@@ -294,7 +295,7 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
   const reset = () => {
     setPatient(null); setWalkin(EMPTY_WALKIN); setReferringDoctor(""); setEncounters([]); setEncounterKey(""); setOutsideSource("");
     setVendorId(""); setAddress(""); setFee(""); setVisitAt(toLocalInput(new Date(Date.now() + 2 * 3600 * 1000)));
-    setLines([]); setDiscountVal(""); setDiscountType("percent"); setPriority("Routine"); setRemarks(""); setDraft(null);
+    setLines([]); setDiscountVal(""); setPriority("Routine"); setRemarks(""); setDraft(null);
     setDuplicateIds([]); setRecent([]);
   };
 
@@ -476,24 +477,18 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
           </div>
         )}
 
-        <div className="lab-ob-discount-head">
-          <Label>Discount</Label>
-          <div className="lab-ob-segment small">
-            <button type="button" className={discountType === "percent" ? "active" : ""} onClick={() => setDiscountType("percent")}>%</button>
-            <button type="button" className={discountType === "flat" ? "active" : ""} onClick={() => setDiscountType("flat")}>Flat</button>
-          </div>
-        </div>
+        <Label>Discount (%){discount > 0 ? ` = ${money(discount)}` : ""}</Label>
         <Input
           type="number"
           name="discount"
-          aria-label="Discount"
+          aria-label="Discount percentage"
           min={0}
-          max={discountType === "percent" ? 100 : gross}
-          placeholder={discountType === "percent" ? "e.g. 10" : "e.g. 100"}
+          max={100}
+          placeholder="e.g. 10"
           value={discountVal}
           onChange={(e) => {
             const raw = e.target.value.replace(/[^0-9.]/g, "");
-            setDiscountVal(raw === "" ? "" : Math.max(Number(raw) || 0, 0));
+            setDiscountVal(raw === "" ? "" : Math.min(Math.max(Number(raw) || 0, 0), 100));
           }}
         />
 

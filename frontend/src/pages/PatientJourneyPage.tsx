@@ -126,6 +126,7 @@ function eventDotColor(type: string) {
   if (type === "vitals") return "#db2777";
   if (type === "prescription") return "#2563eb";
   if (type === "pharmacy_issued") return "#ea580c";
+  if (type === "pharmacy_returned") return "#d97706";
   if (type === "lab_bill" || type === "lab_collected" || type === "imaging_completed" || type === "report_released") return "#9333ea";
   return "#0d9488";
 }
@@ -137,7 +138,7 @@ const EVENT_DEPARTMENTS: Record<string, string> = {
   disposition: "Emergency", nursing_note: "Nursing",
   advance: "Billing", doctor_note: "Doctor Rounds", doctor_transfer: "Doctor Rounds", bed_allocated: "Bed & Ward", bed_released: "Bed & Ward", doctor_round: "Doctor Rounds", observation_note: "Doctor Rounds",
   medication_order: "Pharmacy", surgery: "Surgery",
-  prescription: "Consultation", pharmacy_issued: "Pharmacy",
+  prescription: "Consultation", pharmacy_issued: "Pharmacy", pharmacy_returned: "Pharmacy",
   lab_bill: "Diagnostics", lab_collected: "Diagnostics", imaging_completed: "Diagnostics", report_released: "Diagnostics",
   critical_alert: "Diagnostics", critical_ack: "Diagnostics",
 };
@@ -357,7 +358,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                                 ["Advice", n.advice], ["Follow-up", n.follow_up],
           ] as [string, string][]).filter(([, v]) => v),
         });
-      } else if ((e.type === "pharmacy_issued" || e.type === "lab_bill") && e.items?.length) {
+      } else if ((e.type === "pharmacy_issued" || e.type === "pharmacy_returned" || e.type === "lab_bill") && e.items?.length) {
         const isLab = e.type === "lab_bill";
         const total = e.items.reduce((sum, it) => sum + it.amount, 0);
         const rows: [string, string, string, string][] = e.items.map((it) => (isLab ? [it.name, formatCurrency(it.amount), "", ""] : [it.name, `${it.quantity}`, formatCurrency(it.unit_price), formatCurrency(it.amount)]));

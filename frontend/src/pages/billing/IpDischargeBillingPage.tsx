@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { apiFetch, reportError } from "../../lib/api";
-import { filterDecimal, preventNonNumericDiscountKeys } from "../../lib/format";
+import { filterDecimal, filterPercent, percentOf, preventNonNumericDiscountKeys } from "../../lib/format";
 import type { Notice } from "../../types";
 import { Button, Modal } from "../../components/ui";
 import { printViaIframe } from "../../lib/printViaIframe";
@@ -73,6 +73,7 @@ export default function IpDischargeBillingPage({
   const [payerModalOpen, setPayerModalOpen] = useState(false);
   const [payerDraft, setPayerDraft] = useState<AdmissionPayer>(EMPTY_PAYER);
   const [savingPayer, setSavingPayer] = useState(false);
+  // Discount entered as a percentage of the gross charges (sent to the server in rupees).
   const [discountAmount, setDiscountAmount] = useState<string>("");
   const [paymentMode, setPaymentMode] = useState<string>("");
   const [paymentAmount, setPaymentAmount] = useState<string>("");
@@ -142,7 +143,12 @@ export default function IpDischargeBillingPage({
           localStorage.setItem("selected_discharge_admission", String(res.admission.id ?? cleanKey));
         } catch { /* storage unavailable */ }
         const summ = res.charges_summary || {};
-        setDiscountAmount(String(summ.approved_discount ?? 0));
+        {
+          // The server stores the discount in rupees; the form works in percent of the gross charges.
+          const gross0 = Number(summ.gross_charges) || 0;
+          const amt0 = Number(summ.approved_discount) || 0;
+          setDiscountAmount(gross0 > 0 && amt0 > 0 ? String(Math.round((amt0 / gross0) * 10000) / 100) : "");
+        }
         setPaymentAmount(String(summ.balance_to_collect ?? 0));
         if (onSelectPatient && res.patient) {
           onSelectPatient(res.patient);
@@ -214,7 +220,7 @@ export default function IpDischargeBillingPage({
   // Once the stay is discharged and billed, the figures come from its discharge invoice(s) (what was
   // really billed and paid). Before that they are a live calculation from the charges.
   const isSettled = Boolean(charges.settled);
-  const discVal = isSettled ? Number(charges.billed_discount || 0) : Math.min(Math.max(0, parseFloat(discountAmount) || 0), Math.max(0, Number(charges.gross_charges) || 0));
+  const discVal = isSettled ? Number(charges.billed_discount || 0) : percentOf(Number(charges.gross_charges) || 0, discountAmount);
   const grossShown = isSettled ? Number(charges.billed_gross ?? charges.gross_charges) : charges.gross_charges;
   const liveNetBill = isSettled ? Number(charges.net_bill || 0) : Math.max(0, charges.gross_charges - discVal);
   const liveBalance = isSettled
@@ -1397,15 +1403,17 @@ export default function IpDischargeBillingPage({
                 </div>
 
                 <div className="billing-form-group">
-                  <label className="billing-form-label">Approved Discount / Concession (₹)</label>
+                  <label className="billing-form-label">Approved Discount / Concession (%){discVal > 0 ? ` = ₹${fmt(discVal)}` : ""}</label>
                   <div style={{ display: "flex", gap: "8px" }}>
                     <input
-                      type="number"
-                      step="0.01"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="e.g. 10"
+                      aria-label="Discount percentage"
                       className="billing-form-input"
                       value={discountAmount}
                       onKeyDown={preventNonNumericDiscountKeys}
-                      onChange={(e) => setDiscountAmount(filterDecimal(e.target.value))}
+                      onChange={(e) => setDiscountAmount(filterPercent(e.target.value))}
                     />
                     <button
                       type="button"
@@ -1715,14 +1723,16 @@ export default function IpDischargeBillingPage({
             </div>
 
             <div className="billing-form-group">
-              <label className="billing-form-label">Approved Hospital Discount (₹)</label>
+              <label className="billing-form-label">Approved Hospital Discount (%){discVal > 0 ? ` = ₹${fmt(discVal)}` : ""}</label>
               <input
-                type="number"
-                step="0.01"
+                type="text"
+                inputMode="decimal"
+                placeholder="e.g. 10"
+                aria-label="Discount percentage"
                 className="billing-form-input"
                 value={discountAmount}
                 onKeyDown={preventNonNumericDiscountKeys}
-                onChange={(e) => setDiscountAmount(filterDecimal(e.target.value))}
+                onChange={(e) => setDiscountAmount(filterPercent(e.target.value))}
               />
             </div>
 

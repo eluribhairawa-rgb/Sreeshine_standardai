@@ -6,8 +6,8 @@ import { apiFetch, reportError, getHospitalCode } from "../lib/api";
 import { API_BASE } from "../lib/constants";
 import type { DoctorSchedule, Notice } from "../types";
 import BrandLogo from "../components/BrandLogo";
-import { fitMm, useBranding } from "../lib/branding";
-import { buildHospaiPrintFooterCss } from "../lib/printViaIframe";
+import { escapeBrandText, fitMm, useBranding } from "../lib/branding";
+import { buildHospaiPrintFooterCss, printViaIframe } from "../lib/printViaIframe";
 
 type Props = {
   setNotice: Dispatch<SetStateAction<Notice | null>>;
@@ -559,6 +559,12 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
   });
   const [sendToPharmacy, setSendToPharmacy] = useState(true);
 
+  // Older prescriptions of the selected patient, listed under the form (view / print / reuse).
+  // Selecting a patient opens a fresh form; nothing from these is copied in unless the doctor asks.
+  const [pastPrescriptions, setPastPrescriptions] = useState<any[]>([]);
+  const [pastRxLoading, setPastRxLoading] = useState(false);
+  const pastRxUhidRef = useRef("");
+
   // Search registered patients manually & Directory
   const [patientSearchTerm, setPatientSearchTerm] = useState("");
   const [searchingPatient, setSearchingPatient] = useState(false);
@@ -1049,6 +1055,8 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
     if (!uhid) {
       setLatestVitalsRecord(null);
       setVitalsSourceUhid("");
+      pastRxUhidRef.current = "";
+      setPastPrescriptions([]);
       return;
     }
     if (uhid === vitalsSourceUhid) return;
@@ -1094,56 +1102,139 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
     };
   }, [patientUhid, activeQueueItem?.appointmentId]);
 
-  // Load previous prescription for patient (medicines, diagnosis, lab tests, advice, lab params, follow-up)
+  // Blank the prescription part of the form (diagnosis, medicines, labs, advice, follow-up) for a new consultation.
+  const resetPrescriptionFields = () => {
+    setDiagnosis("");
+    setLabTests("");
+    setAdvice("");
+    const d = new Date();
+    d.setDate(d.getDate() + 5);
+    setFollowUpDate(d.toLocaleDateString("en-CA"));
+    setLabFbs("");
+    setLabPpbs("");
+    setLabHba1c("");
+    setLabTchol("");
+    setLabLdl("");
+    setLabTgl("");
+    setLabVitd("");
+    setMedicines([{ id: `med-${Date.now()}`, medicine_name: "", dosage: "", frequency: "", duration: "", instructions: "" }]);
+  };
+
+  // Load the patient's older prescriptions into the "Previous Prescriptions" list below the form.
+  // A newly selected patient always gets a fresh, empty prescription form.
   const loadPatientPreviousPrescription = async (uhid: string, patientNameDisplay?: string) => {
-    if (!uhid || !uhid.trim()) return null;
+    const key = (uhid || "").trim();
+    if (!key) return null;
+    const isNewPatient = pastRxUhidRef.current.toLowerCase() !== key.toLowerCase();
+    if (isNewPatient) {
+      pastRxUhidRef.current = key;
+      resetPrescriptionFields();
+      setPastPrescriptions([]);
+    }
+    setPastRxLoading(true);
     try {
-      const res = await apiFetch<{ prescriptions?: any[] }>(`/api/prescriptions?patient_id=${encodeURIComponent(uhid.trim())}`);
+      const res = await apiFetch<{ prescriptions?: any[] }>(`/api/prescriptions?patient_id=${encodeURIComponent(key)}`);
       const prescList = res?.prescriptions && Array.isArray(res.prescriptions) ? res.prescriptions : [];
+      // Ignore a late answer for a patient that is no longer selected.
+      if (pastRxUhidRef.current.toLowerCase() !== key.toLowerCase()) return null;
+      setPastPrescriptions(prescList);
       if (prescList.length > 0) {
-        const latest = prescList[0];
-
-        // Restore diagnosis, tests, advice, follow-up
-        if (latest.diagnosis) setDiagnosis(latest.diagnosis);
-        if (latest.lab_tests) setLabTests(latest.lab_tests);
-        if (latest.advice) setAdvice(latest.advice);
-        if (latest.follow_up_date) setFollowUpDate(latest.follow_up_date);
-
-        // Restore lab parameters
-        setLabFbs(latest.lab_fbs || "");
-        setLabPpbs(latest.lab_ppbs || "");
-        setLabHba1c(latest.lab_hba1c || "");
-        setLabTchol(latest.lab_tchol || "");
-        setLabLdl(latest.lab_ldl || "");
-        setLabTgl(latest.lab_tgl || "");
-        setLabVitd(latest.lab_vitd || "");
-
-        // Restore prescribed medicines list
-        if (Array.isArray(latest.medicines) && latest.medicines.length > 0) {
-          const stamp = Date.now();
-          const loadedMeds: MedicineItem[] = latest.medicines.map((m: any, i: number) => ({
-            id: `med-prev-${stamp}-${i}`,
-            medicine_name: m.medicine_name || "",
-            dosage: m.dosage || "",
-            frequency: m.frequency || "",
-            duration: m.duration || "",
-            instructions: m.instructions || "",
-          }));
-          setMedicines(loadedMeds);
+        if (isNewPatient) {
+          setNotice({
+            type: "success",
+            message: `New prescription form ready for ${patientNameDisplay || key}. ${prescList.length} previous prescription(s) are listed at the bottom of the page.`,
+          });
         }
-
-        const dateStr = latest.created_at ? new Date(latest.created_at).toLocaleDateString("en-IN") : "";
-        const medCount = latest.medicines?.length || 0;
-        setNotice({
-          type: "success",
-          message: `Loaded past prescription for ${patientNameDisplay || uhid}${dateStr ? ` (${dateStr})` : ""}: ${medCount} medicine(s), diagnosis and advice restored.`,
-        });
-        return latest;
+        return prescList[0];
       }
     } catch {
       // non-blocking
+    } finally {
+      if (pastRxUhidRef.current.toLowerCase() === key.toLowerCase()) setPastRxLoading(false);
     }
     return null;
+  };
+
+  // Copy an older prescription into the current form (repeat medicines etc.).
+  const handleReusePastPrescription = (rx: any) => {
+    setDiagnosis(rx.diagnosis || "");
+    setLabTests(rx.lab_tests || "");
+    setAdvice(rx.advice || "");
+    setLabFbs(rx.lab_fbs || "");
+    setLabPpbs(rx.lab_ppbs || "");
+    setLabHba1c(rx.lab_hba1c || "");
+    setLabTchol(rx.lab_tchol || "");
+    setLabLdl(rx.lab_ldl || "");
+    setLabTgl(rx.lab_tgl || "");
+    setLabVitd(rx.lab_vitd || "");
+    const stamp = Date.now();
+    const meds: MedicineItem[] = (Array.isArray(rx.medicines) ? rx.medicines : []).map((m: any, i: number) => ({
+      id: `med-prev-${stamp}-${i}`,
+      medicine_name: m.medicine_name || "",
+      dosage: m.dosage || "",
+      frequency: m.frequency || "",
+      duration: m.duration || "",
+      instructions: m.instructions || "",
+    }));
+    setMedicines(meds.length ? meds : [{ id: `med-${stamp}`, medicine_name: "", dosage: "", frequency: "", duration: "", instructions: "" }]);
+    setNotice({ type: "info", message: `Copied the prescription of ${formatRxDate(rx.created_at)} into the form. Review it before saving.` });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const formatRxDate = (value?: string | null) => {
+    if (!value) return "-";
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return String(value);
+    return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true });
+  };
+
+  // Print one older prescription: printViaIframe adds the hospital header (logo row) and footer; the report
+  // title / address / print-date row is hidden.
+  const handlePrintPastPrescription = (rx: any) => {
+    const esc = (v: unknown) => escapeBrandText(String(v ?? "").trim() || "-");
+    const opt = (v: unknown) => String(v ?? "").trim();
+    const meds: any[] = Array.isArray(rx.medicines) ? rx.medicines.filter((m: any) => opt(m.medicine_name)) : [];
+    const labs = [
+      ["FBS", rx.lab_fbs], ["PPBS", rx.lab_ppbs], ["HbA1c", rx.lab_hba1c], ["T.Chol", rx.lab_tchol],
+      ["LDL", rx.lab_ldl], ["TGL", rx.lab_tgl], ["Vit D", rx.lab_vitd],
+    ].filter(([, v]) => opt(v));
+    const ageGender = [patientAge ? `${patientAge} Y` : "", patientGender].filter(Boolean).join(" / ");
+    const row = (label: string, value: string) => `<div class="f"><span class="l">${label}</span><span class="v">${value}</span></div>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Prescription - ${esc(patientName || rx.patient_id)}</title>
+      <style>
+        body { font-family: Arial, Helvetica, sans-serif; color: #0f172a; font-size: 12.5px; }
+        .head { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 24px; border: 1.5px solid #00828a; border-radius: 6px; padding: 10px 14px; }
+        .f { display: flex; gap: 6px; } .l { color: #475569; font-weight: 700; min-width: 92px; } .v { font-weight: 700; }
+        .sym { font-family: "Times New Roman", Georgia, serif; font-size: 40px; font-weight: 700; color: #00828a; margin: 12px 0 4px; line-height: 1; }
+        h3 { font-size: 13px; margin: 14px 0 6px; color: #00828a; text-transform: uppercase; letter-spacing: .03em; }
+        table.meds { width: 100%; border-collapse: collapse; }
+        table.meds th, table.meds td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top; }
+        table.meds th { background: #f1f5f9; }
+        p { margin: 0; white-space: pre-wrap; }
+        .sign { display: flex; justify-content: flex-end; margin-top: 24mm; }
+        .sign div { border-top: 1px solid #334155; padding-top: 4px; min-width: 60mm; text-align: center; font-weight: 700; }
+      </style></head><body>
+      <!-- Keep the hospital header (logo row); data-hospai-print-hide-report-row drops only the title / address / print-date row. -->
+      <div class="head" data-hospai-print-hide-report-row>
+        ${row("Patient Name", esc(patientName))}
+        ${row("Patient ID", esc(rx.patient_id || patientUhid))}
+        ${row("Age / Gender", esc(ageGender))}
+        ${row("Rx Date", esc(formatRxDate(rx.created_at)))}
+        ${row("Doctor", esc(rx.doctor_name))}
+        ${row("Department", esc(rx.department))}
+      </div>
+      ${opt(rx.diagnosis) ? `<h3>Diagnosis</h3><p>${esc(rx.diagnosis)}</p>` : ""}
+      <div class="sym">&#8478;</div>
+      ${meds.length ? `<table class="meds"><thead><tr><th>#</th><th>Medicine</th><th>Dosage</th><th>Frequency</th><th>Duration</th><th>Instructions</th></tr></thead><tbody>
+        ${meds.map((m, i) => `<tr><td>${i + 1}</td><td><b>${esc(m.medicine_name)}</b></td><td>${esc(m.dosage)}</td><td>${esc(m.frequency)}</td><td>${esc(m.duration)}</td><td>${esc(m.instructions)}</td></tr>`).join("")}
+      </tbody></table>` : `<p>No medicines prescribed.</p>`}
+      ${opt(rx.lab_tests) ? `<h3>Investigations Advised</h3><p>${esc(rx.lab_tests)}</p>` : ""}
+      ${labs.length ? `<h3>Lab Values</h3><p>${labs.map(([k, v]) => `${k}: ${esc(v)}`).join(" &nbsp;|&nbsp; ")}</p>` : ""}
+      ${opt(rx.advice) ? `<h3>Advice</h3><p>${esc(rx.advice)}</p>` : ""}
+      ${opt(rx.follow_up_date) ? `<h3>Follow-up</h3><p>${esc(new Date(rx.follow_up_date).toLocaleDateString("en-GB"))}</p>` : ""}
+      <div class="sign"><div>Doctor's Signature<br/><span style="font-weight:400">${esc(rx.doctor_name)}</span></div></div>
+      </body></html>`;
+    printViaIframe(html);
   };
 
   // Select patient from queue
@@ -1284,6 +1375,9 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
 
   // Reset / Clear prescription form for the next patient
   const clearPrescriptionForm = () => {
+    pastRxUhidRef.current = "";
+    setPastPrescriptions([]);
+    setPastRxLoading(false);
     setActiveQueueItem(null);
     setPatientLocked(false);
     setPatientUhid("");
@@ -1521,6 +1615,7 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
         type: "success",
         message: `Prescription draft saved successfully for ${patientName}.`,
       });
+      void loadPatientPreviousPrescription(patientUhid.trim(), patientName);
     } catch (error) {
       reportError(setNotice, error as { message?: string; status?: number }, "Failed to save prescription draft.");
     } finally {
@@ -1759,6 +1854,7 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
           .doctor-rx-layout-split > :first-child,
           .doctor-rx-actions-row,
           .doctor-rx-preview-header,
+          .doctor-rx-history-section,
           .doctor-rx-sub-header {
             display: none !important;
           }
@@ -3871,6 +3967,81 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
           </div>
         </div>
       </div>
+
+      {/* Previous prescriptions of the selected patient (bottom of the page) */}
+      {patientUhid.trim() && (
+        <div className="doctor-rx-card doctor-rx-history-section" style={{ marginTop: "16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", gap: "12px", flexWrap: "wrap" }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: "16px", color: "#0f172a" }}>
+                <span style={{ fontFamily: "'Times New Roman', Georgia, serif", color: "#00828a", marginRight: "6px" }}>℞</span>
+                Previous Prescriptions
+              </h3>
+              <span style={{ fontSize: "12px", color: "#64748b" }}>
+                {patientName ? `${patientName} · ` : ""}{patientUhid.trim()} · newest first
+              </span>
+            </div>
+            <span style={{ fontSize: "12px", fontWeight: 700, color: "#00828a", background: "#f0fdfa", border: "1px solid #ccfbf1", borderRadius: "999px", padding: "3px 10px" }}>
+              {pastRxLoading ? "Loading…" : `${pastPrescriptions.length} record${pastPrescriptions.length === 1 ? "" : "s"}`}
+            </span>
+          </div>
+
+          {!pastRxLoading && pastPrescriptions.length === 0 ? (
+            <div style={{ padding: "18px", textAlign: "center", color: "#64748b", fontSize: "13px", border: "1px dashed #cbd5e1", borderRadius: "8px" }}>
+              No previous prescriptions for this patient.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {pastPrescriptions.map((rx) => {
+                const meds: any[] = Array.isArray(rx.medicines) ? rx.medicines.filter((m: any) => (m.medicine_name || "").trim()) : [];
+                return (
+                  <div key={rx.id} style={{ border: "1px solid #e2e8f0", borderRadius: "8px", padding: "12px 14px", background: "#ffffff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px", flexWrap: "wrap" }}>
+                      <div style={{ fontSize: "13px", color: "#0f172a" }}>
+                        <div style={{ fontWeight: 800 }}>{formatRxDate(rx.created_at)}</div>
+                        <div style={{ color: "#475569", marginTop: "2px" }}>
+                          {rx.doctor_name || "-"}{rx.department ? ` · ${rx.department}` : ""}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button type="button" className="rx-outline-btn" onClick={() => handleReusePastPrescription(rx)} title="Copy this prescription into the new form">
+                          Reuse in Form
+                        </button>
+                        <button
+                          type="button"
+                          className="refresh-preview-btn"
+                          onClick={() => handlePrintPastPrescription(rx)}
+                          title="Print this prescription"
+                          style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="6 9 6 2 18 2 18 9" />
+                            <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                            <rect x="6" y="14" width="12" height="8" />
+                          </svg>
+                          <span>Print</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: "8px", fontSize: "12.5px", color: "#334155", display: "grid", gap: "4px" }}>
+                      {rx.diagnosis && <div><strong>Diagnosis:</strong> {rx.diagnosis}</div>}
+                      <div>
+                        <strong>Medicines:</strong>{" "}
+                        {meds.length
+                          ? meds.map((m) => [m.medicine_name, m.dosage, m.frequency, m.duration].filter(Boolean).join(" ")).join(" · ")
+                          : "None"}
+                      </div>
+                      {rx.lab_tests && <div><strong>Investigations:</strong> {rx.lab_tests}</div>}
+                      {rx.advice && <div><strong>Advice:</strong> {rx.advice}</div>}
+                      {rx.follow_up_date && <div><strong>Follow-up:</strong> {new Date(rx.follow_up_date).toLocaleDateString("en-GB")}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Registered Patients Master Directory Modal */}
       {patientDirectoryModalOpen && (

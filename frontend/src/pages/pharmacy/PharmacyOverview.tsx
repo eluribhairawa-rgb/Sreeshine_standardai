@@ -7,7 +7,7 @@ import DateCalendarPicker, { toIsoDate, parseIsoDate } from "../../components/Da
 import { DonutChart } from "../../components/charts";
 import { printViaIframe } from "../../lib/printViaIframe";
 import { buildPrintDocumentHtml } from "../../lib/printTemplates";
-import { printPharmacyInvoiceById } from "../../lib/pharmacyInvoicePrint";
+import { printPharmacyCreditNoteById, printPharmacyInvoiceById } from "../../lib/pharmacyInvoicePrint";
 
 type Props = {
   setNotice: Dispatch<SetStateAction<Notice | null>>;
@@ -1957,7 +1957,22 @@ export default function PharmacyOverview({ setNotice, onNavigate }: Props) {
                     </td>
                     <td style={{ padding: "8px 10px", textAlign: "center" }}>
                       {t.type === "Return" ? (
-                        <span style={{ color: "#94a3b8" }}>—</span>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          style={{ padding: "2px 10px", fontSize: "11.5px", whiteSpace: "nowrap" }}
+                          title="Print the credit note (return / refund bill)"
+                          onClick={() => {
+                            const retId = t.reference.startsWith("RET-") ? t.reference.slice(4) : t.reference;
+                            printPharmacyCreditNoteById(retId, {
+                              patient_id: t.uhid, patient_name: t.patient_name, medicine_name: t.medicine_name,
+                              refund_mode: t.payment_mode, date: t.date_time,
+                            }).catch((err) =>
+                              setNotice({ type: "error", message: err instanceof Error ? err.message : "Unable to print the credit note." }));
+                          }}
+                        >
+                          🖨 Credit Note
+                        </Button>
                       ) : (
                         <Button
                           type="button"

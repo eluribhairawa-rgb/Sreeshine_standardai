@@ -4,7 +4,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { Notice, Patient, PatientForm } from "../types";
 import { apiFetch, reportError } from "../lib/api";
 import { printViaIframe } from "../lib/printViaIframe";
-import { calculateAgeFromDob, filterDecimal, preventNonNumericDiscountKeys } from "../lib/format";
+import { calculateAgeFromDob, filterDecimal, filterPercent, percentOf, preventNonNumericDiscountKeys } from "../lib/format";
 import { doctorsInDepartment, useDoctorDirectory } from "../lib/doctorDirectory";
 import { Modal } from "../components/ui";
 import { COUNTRY_CODE_RULES, parsePhoneInput, splitStoredPhone, toWhatsAppNumber, validateMobileByCountry } from "../lib/phone";
@@ -70,6 +70,12 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     fee: string | number;
     paymentMode: string;
     date: string;
+    // Patient snapshot: the form is cleared for the next patient right after booking.
+    patientId: string;
+    patientName: string;
+    age: string;
+    gender: string;
+    bookedAt: string;
   } | null>(null);
   const [bookingAppointment, setBookingAppointment] = useState(false);
   const [registering, setRegistering] = useState(false);
@@ -212,7 +218,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
   const [consultationFee, setConsultationFee] = useState<string | number>("");
   const [consultationDiscount, setConsultationDiscount] = useState<string>("");
   const consultationFeeNum = Math.max(0, Number(consultationFee) || 0);
-  const consultationDiscountAmt = Math.min(Math.max(0, parseFloat(consultationDiscount) || 0), consultationFeeNum);
+  const consultationDiscountAmt = percentOf(consultationFeeNum, consultationDiscount);
   const consultationNetFee = Math.max(0, consultationFeeNum - consultationDiscountAmt);
   const [appointmentType, setAppointmentType] = useState<"" | "Consultation" | "Review" | "Follow-up">("");
   const [paymentMode, setPaymentMode] = useState<"" | "Cash" | "UPI" | "Card" | "Waived">("");
@@ -846,6 +852,11 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         fee: consultationNetFee,
         paymentMode,
         date: new Date().toLocaleDateString("en-GB"),
+        patientId: currentId!,
+        patientName: currentName,
+        age: currentAge,
+        gender: currentGender,
+        bookedAt: new Date().toISOString(),
       });
 
       setLastRegisteredPatient((prev) => ({
@@ -970,6 +981,52 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
       </div>
     `;
     printViaIframe(slipHtml);
+  };
+
+  // Blank prescription pad for the doctor: only patient identity, doctor, department, date/time and the Rx symbol.
+  // printViaIframe adds the hospital header (logo row), page footer and watermark; the report title/print-date row is hidden.
+  const handlePrintPrescription = () => {
+    const appt = bookedAppointment;
+    if (!appt?.patientId) {
+      setNotice({ type: "warning", message: "Book the appointment first, then print the prescription." });
+      return;
+    }
+    const esc = (v: unknown) => escapeBrandText(String(v ?? "").trim() || "-");
+    const when = new Date(appt.bookedAt || Date.now());
+    const dateText = when.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" });
+    const timeText = when.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true });
+    const ageGender = [appt.age ? `${appt.age} Y` : "", appt.gender].filter(Boolean).join(" / ");
+    const row = (label: string, value: string) =>
+      `<div class="rx-f"><span class="rx-l">${label}</span><span class="rx-v">${value}</span></div>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Prescription - ${esc(appt.patientName)}</title>
+      <style>
+        @page { size: A4; margin: 12mm; }
+        body { font-family: Arial, Helvetica, sans-serif; color: #0f172a; margin: 0; }
+        .rx-head { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 24px; border: 1.5px solid #00828a; border-radius: 6px; padding: 10px 14px; font-size: 13px; }
+        .rx-f { display: flex; gap: 6px; }
+        .rx-l { color: #475569; font-weight: 700; min-width: 92px; }
+        .rx-v { font-weight: 700; }
+        .rx-sym { font-family: "Times New Roman", Georgia, serif; font-size: 54px; font-weight: 700; color: #00828a; line-height: 1; margin: 18px 0 0 4px; }
+        .rx-space { min-height: 150mm; }
+        .rx-sign { display: flex; justify-content: flex-end; margin-top: 8mm; font-size: 12.5px; }
+        .rx-sign div { border-top: 1px solid #334155; padding-top: 4px; min-width: 60mm; text-align: center; font-weight: 700; }
+      </style></head><body>
+      <!-- Keep the hospital header (logo row); data-hospai-print-hide-report-row drops only the title / address / print-date row. -->
+      <div class="rx-head" data-hospai-print-hide-report-row>
+        ${row("Patient Name", esc(appt.patientName))}
+        ${row("Patient ID", esc(appt.patientId))}
+        ${row("Age / Gender", esc(ageGender))}
+        ${row("Token No", esc(appt.tokenNo ? `#${appt.tokenNo}` : ""))}
+        ${row("Doctor", esc(appt.doctor))}
+        ${row("Department", esc(appt.department))}
+        ${row("Date", esc(dateText))}
+        ${row("Time", esc(timeText))}
+      </div>
+      <div class="rx-sym">&#8478;</div>
+      <div class="rx-space"></div>
+      <div class="rx-sign"><div>Doctor's Signature<br/><span style="font-weight:400">${esc(appt.doctor)}</span></div></div>
+      </body></html>`;
+    printViaIframe(html);
   };
 
   const handleShareWhatsAppSlip = () => {
@@ -2263,7 +2320,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
                   #{bookedAppointment.tokenNo}
                 </div>
                 <div style={{ fontSize: "12.5px", color: "#475569", fontWeight: 600, marginTop: "2px" }}>
-                  UHID: {patientId} • Fee: ₹{bookedAppointment.fee} ({bookedAppointment.paymentMode})
+                  UHID: {bookedAppointment.patientId || patientId} • Fee: ₹{bookedAppointment.fee} ({bookedAppointment.paymentMode})
                 </div>
               </div>
 
@@ -2288,6 +2345,27 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
                   onClick={handlePrintSlip}
                 >
                   🖨 Print Token & Slip
+                </button>
+
+                <button
+                  type="button"
+                  style={{
+                    padding: "10px 22px",
+                    fontSize: "14px",
+                    fontWeight: 700,
+                    borderRadius: "8px",
+                    background: "#ffffff",
+                    color: "#00828a",
+                    border: "1.5px solid #00828a",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "8px",
+                  }}
+                  onClick={handlePrintPrescription}
+                  title="Print a blank prescription with the patient, doctor, department, date and time"
+                >
+                  <span style={{ fontFamily: "'Times New Roman', Georgia, serif", fontSize: "17px", lineHeight: 1 }}>℞</span> Print Prescription
                 </button>
 
                 <button
@@ -2522,22 +2600,18 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
               <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.2fr", gap: "18px", marginBottom: "20px" }}>
                 <div>
                   <label style={{ fontSize: "12.5px", fontWeight: 700, color: "#1e293b", display: "block", marginBottom: "6px" }}>
-                    Discount (₹)
+                    Discount (%){consultationDiscountAmt > 0 ? ` = ₹${consultationDiscountAmt.toFixed(2)}` : ""}
                   </label>
                   <input
                     type="text"
                     inputMode="decimal"
                     name="discount"
-                    aria-label="Discount"
-                    placeholder="e.g. 50"
+                    aria-label="Discount percentage"
+                    placeholder="e.g. 10"
                     value={consultationDiscount}
                     disabled={consultationFeeNum <= 0}
                     onKeyDown={preventNonNumericDiscountKeys}
-                    onChange={(e) => {
-                      const cleaned = filterDecimal(e.target.value);
-                      const num = parseFloat(cleaned);
-                      setConsultationDiscount(!isNaN(num) && num > consultationFeeNum ? String(consultationFeeNum) : cleaned);
-                    }}
+                    onChange={(e) => setConsultationDiscount(filterPercent(e.target.value))}
                     className="pharmacy-rx-search-input"
                     style={{ height: "42px", padding: "0 12px", borderRadius: "8px", border: "1px solid #cbd5e1", width: "100%", boxSizing: "border-box" }}
                   />

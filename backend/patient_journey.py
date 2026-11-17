@@ -409,6 +409,57 @@ def _pharmacy_bill_events(cursor, pharmacy_rows, title="Pharmacy bill"):
     return events
 
 
+def _pharmacy_return_events(cursor, pharmacy_rows):
+    """Medicines returned against this encounter's pharmacy sales (credit notes), newest data from pharmacy_returns.
+
+    Returns (events, total_return_value). Each event carries the credit-note value as a negative charge and
+    the money given back (cash/UPI/card refund) separately from any unpaid balance that was cancelled.
+    """
+    sale_ids = [r["id"] for r in pharmacy_rows if r.get("id") is not None]
+    if not sale_ids:
+        return [], 0.0
+    cursor.execute(
+        "SELECT pr.id, pr.quantity, pr.reason, pr.status, pr.created_at, pr.created_by, pr.refund_amount, pr.cash_refunded, "
+        "       ps.medicine_name, ps.unit_price, ps.payment_mode, ps.invoice_id, inv.invoice_no "
+        "FROM pharmacy_returns pr JOIN pharmacy_sales ps ON ps.id = pr.original_sale_id "
+        "LEFT JOIN invoices inv ON inv.id = ps.invoice_id "
+        "WHERE pr.original_sale_id = ANY(?) ORDER BY pr.created_at",
+        (sale_ids,),
+    )
+    events, total = [], 0.0
+    for r in _all(cursor):
+        qty = float(r["quantity"] or 0)
+        unit = float(r["unit_price"] or 0)
+        stored = float(r["refund_amount"] or 0)
+        # Older returns did not store refund figures: their value is qty x unit price, refunded in full.
+        value = round(stored if stored > 0 else qty * unit, 2)
+        cash = round(float(r["cash_refunded"] or 0) if stored > 0 else value, 2)
+        cancelled = round(max(0.0, value - cash), 2)
+        total += value
+        stock = {"released": "Restocked", "rejected": "Written off (damaged)", "quarantined": "In quarantine"}.get(r["status"], r["status"] or "")
+        money = []
+        if cash > 0:
+            money.append(f"Refunded \u20b9{cash:,.2f} ({(r['payment_mode'] or 'cash').upper()})")
+        if cancelled > 0:
+            money.append(f"Due cancelled \u20b9{cancelled:,.2f}")
+        d, t = _split_dt(r["created_at"])
+        events.append({
+            "date": d, "time": t, "type": "pharmacy_returned",
+            "title": "Medicine returned & refunded" if cash > 0 else "Medicine returned",
+            "subtitle": " · ".join(x for x in [
+                f"CN-{int(r['id']):06d}", f"against {r['invoice_no']}" if r["invoice_no"] else "",
+                *money, r["reason"] or "", stock,
+            ] if x),
+            "charge": -value, "received": None,
+            "refund": cash, "due_cancelled": cancelled, "credit_note_no": f"CN-{int(r['id']):06d}",
+            "return_id": r["id"], "invoice_no": r["invoice_no"], "invoice_id": r["invoice_id"],
+            # True when the return already adjusted its invoice (newer returns); older ones never touched it.
+            "invoice_adjusted": stored > 0,
+            "items": [{"name": r["medicine_name"], "quantity": qty, "unit_price": unit, "amount": -value}],
+        })
+    return events, round(total, 2)
+
+
 def _lab_bill_events(cursor, diag_items):
     """One event per confirmed lab/diagnostics order bill, listing the tests billed."""
     orders = {}
@@ -1068,14 +1119,32 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
                 {"type": "final_bill", "label": "Final bill", "available": len(invoice_ids) > 0, "ref": None},
             ]
 
+        # Pharmacy returns / refunds (credit notes) against this encounter's medicine sales.
+        return_events, returns_total = _pharmacy_return_events(cursor, pharmacy_rows)
+        events.extend(return_events)
+        if returns_total > 0:
+            categories = list(categories) + [("Pharmacy returns", -returns_total)]
+
         total_charges = payments_received = outstanding = 0.0
         for iid in invoice_ids:
             cursor.execute("SELECT total_amount, paid_amount, due_amount FROM invoices WHERE id = ?", (iid,))
             inv = cursor.fetchone()
             if inv:
-                total_charges += float(inv["total_amount"] or 0)
-                payments_received += float(inv["paid_amount"] or 0)
-                outstanding += float(inv["due_amount"] or 0)
+                # Cash / UPI / card handed back for returned medicines (negative "REFUND: Return #" payment rows).
+                # Such a refund leaves the invoice total unchanged, so it is taken off both the charge and
+                # the amount collected. min() keeps this right whether or not paid_amount was already reduced
+                # (older returns lowered it, newer ones only record the refund), and for cancelled lab tests.
+                cursor.execute(
+                    "SELECT COALESCE(SUM(-amount), 0) AS r FROM invoice_payments "
+                    "WHERE invoice_id = ? AND amount < 0 AND gateway_ref LIKE 'REFUND: Return #%'",
+                    (iid,),
+                )
+                pharm_refund = float(cursor.fetchone()["r"] or 0)
+                total_amt = float(inv["total_amount"] or 0)
+                due_amt = float(inv["due_amount"] or 0)
+                total_charges += total_amt - pharm_refund
+                payments_received += max(0.0, min(float(inv["paid_amount"] or 0), total_amt - due_amt - pharm_refund))
+                outstanding += due_amt
 
         due_invoices = []
         for iid in invoice_ids:
@@ -1101,7 +1170,8 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
         )
         payments = [
             {"date": _split_dt(p["created_at"])[0], "time": _split_dt(p["created_at"])[1],
-             "mode": (p["payment_mode"] or "cash").title(), "reference": f"PMT-{p['id']}",
+             "mode": (f"Refund ({(p['payment_mode'] or 'cash').upper()})" if float(p["amount"] or 0) < 0 else (p["payment_mode"] or "cash").title()),
+             "reference": f"PMT-{p['id']}",
              "invoice_no": p["invoice_no"], "amount": float(p["amount"] or 0)}
             for p in cursor.fetchall()
         ]

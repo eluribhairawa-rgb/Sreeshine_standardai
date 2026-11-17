@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { filterPercent } from "../lib/format";
 import { brandTitle, escapeBrandText } from "../lib/branding";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Label, Modal, Select } from "../components/ui";
@@ -478,8 +479,9 @@ export default function LabPage({ setNotice, user }: Props) {
   const [payingDueAmount, setPayingDueAmount] = useState("");
   const [billNotes, setBillNotes] = useState("");
   
-  const [discountType, setDiscountType] = useState<"percentage" | "fixed">("percentage");
-  const [discountFixedAmount, setDiscountFixedAmount] = useState("");
+  // Discounts are always a percentage of the subtotal.
+  const discountType = "percentage" as "percentage" | "fixed";
+  const discountFixedAmount = "";
 
 
   const labTotal = useMemo(() => labItems.reduce((sum, item) => sum + Number(item.rate) * Number(item.quantity), 0), [labItems]);
@@ -1892,49 +1894,18 @@ export default function LabPage({ setNotice, user }: Props) {
               /></Label>
             </div>
             <div className="lab-field">
-              <Label>Discount Type
-                <Select 
-                  value={discountType} 
-                  onChange={(event) => {
-                    setDiscountType(event.target.value as "percentage" | "fixed");
-                    setDiscountPercentage("");
-                    setDiscountFixedAmount("");
-                  }} 
-                  aria-label="Discount Type"
-                >
-                  <option value="percentage">Percentage (%)</option>
-                  <option value="fixed">Fixed Amount</option>
-                </Select>
-              </Label>
+              <Label>Discount (%)<Input 
+                type="number"
+                min={0}
+                max={100}
+                value={discountPercentage}
+                onChange={(event) => setDiscountPercentage(filterPercent(event.target.value))}
+                placeholder="e.g. 10"
+                className="no-spin"
+                onWheel={(e) => (e.target as HTMLElement).blur()}
+                aria-label="Discount Percentage"
+              /></Label>
             </div>
-            {discountType === "percentage" ? (
-              <div className="lab-field">
-                <Label>Percentage / Discount (%)<Input 
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={discountPercentage}
-                  onChange={(event) => setDiscountPercentage(event.target.value.replace(/[^0-9.]/g, ""))}
-                  placeholder=""
-                  className="no-spin"
-                  onWheel={(e) => (e.target as HTMLElement).blur()}
-                  aria-label="Discount Percentage"
-                /></Label>
-              </div>
-            ) : (
-              <div className="lab-field">
-                <Label>Fixed Discount (₹)<Input 
-                  type="number"
-                  min={0}
-                  value={discountFixedAmount}
-                  onChange={(event) => setDiscountFixedAmount(event.target.value.replace(/[^0-9.]/g, ""))}
-                  placeholder=""
-                  className="no-spin"
-                  onWheel={(e) => (e.target as HTMLElement).blur()}
-                  aria-label="Fixed Discount Amount"
-                /></Label>
-              </div>
-            )}
             <div className="lab-field">
               <Label>Calculated Discount (₹)<Input 
                 type="text"
