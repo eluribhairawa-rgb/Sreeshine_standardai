@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { sharePrintAsPdfOnWhatsApp } from "../../lib/whatsappPdfShare";
 import { filterPercent } from "../../lib/format";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Modal } from "../../components/ui";
@@ -737,6 +738,18 @@ export default function PharmacyOpDispense({ setNotice, onNavigate }: Props) {
     ].filter(Boolean);
 
     const text = lines.join("\n");
+
+    // Send the printed document itself as a PDF (WhatsApp links can only carry text); the summary
+
+    // above goes along as the message. Falls back to the text-only message below.
+
+    if (sharePrintAsPdfOnWhatsApp(() => handlePrintRepaymentReceipt(), {
+
+      filename: `Repayment_Receipt_${invoice.invoice_no || ""}`, title: "Due Repayment Receipt", text,
+
+      phone: parts.value, phoneCountryCode: parts.countryCode,
+
+    }, setNotice)) return;
     const url = waNumber
       ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
       : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
@@ -1045,6 +1058,18 @@ export default function PharmacyOpDispense({ setNotice, onNavigate }: Props) {
     ].filter(Boolean);
 
     const text = lines.join("\n");
+
+    // Send the printed document itself as a PDF (WhatsApp links can only carry text); the summary
+
+    // above goes along as the message. Falls back to the text-only message below.
+
+    if (sharePrintAsPdfOnWhatsApp(() => handlePrintInvoice(), {
+
+      filename: `Pharmacy_Invoice_${invoiceNumber}`, title: "Pharmacy Invoice", text,
+
+      phone: parts.value, phoneCountryCode: parts.countryCode,
+
+    }, setNotice)) return;
     const url = waNumber
       ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
       : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;

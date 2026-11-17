@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Modal } from "./ui";
 import { downloadExportBlob } from "../lib/exportShare";
+import { canShareFiles, downloadAndOpenWhatsApp } from "../lib/whatsappPdfShare";
 
 type ShareModalProps = {
   open: boolean;
@@ -184,7 +185,29 @@ export default function ShareModal({ open, onClose, options }: ShareModalProps) 
           </a>
 
           {/* WhatsApp */}
-          <a href={shareUrls.whatsapp} target="_blank" rel="noopener noreferrer" className="share-tile share-tile-whatsapp">
+          <a
+            href={shareUrls.whatsapp}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="share-tile share-tile-whatsapp"
+            onClick={(e) => {
+              // WhatsApp links carry only text: send the exported file itself through the share sheet,
+              // or download it and open WhatsApp to attach it.
+              e.preventDefault();
+              void (async () => {
+                if (canShareFiles()) {
+                  try {
+                    const type = filename.toLowerCase().endsWith(".pdf") ? "application/pdf" : (blob.type || "application/octet-stream");
+                    await navigator.share({ files: [new File([blob], filename, { type })], title, text: title } as ShareData);
+                    return;
+                  } catch (err) {
+                    if (err instanceof DOMException && err.name === "AbortError") return;
+                  }
+                }
+                downloadAndOpenWhatsApp({ blob, filename, title, text: `*${title}* exported from HospAI.${shareUrl ? `\n\nView online:\n${shareUrl}` : ""}` });
+              })();
+            }}
+          >
             <div className="share-tile-icon">
               <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />

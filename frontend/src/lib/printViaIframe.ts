@@ -325,7 +325,33 @@ function applyWatermark(html: string): string {
   return out;
 }
 
+/** The exact document printViaIframe prints (shared hospital header, footer CSS, watermark) -- used to make PDFs. */
+export function buildPrintableHtml(html: string): string {
+  return applyWatermark(applySharedHospaiPrintFrame(html));
+}
+
+let printCaptureSink: ((html: string) => void) | null = null;
+
+/**
+ * Runs a page's existing (synchronous) print function but, instead of printing, returns the HTML it would
+ * have printed. Lets "Share via WhatsApp" send exactly the document the Print button produces, as a PDF.
+ */
+export function capturePrintHtml(runPrint: () => void): string | null {
+  let captured: string | null = null;
+  printCaptureSink = (html) => { captured = html; };
+  try {
+    runPrint();
+  } finally {
+    printCaptureSink = null;
+  }
+  return captured;
+}
+
 export function printViaIframe(html: string, frameId = "__hospai_print_frame__"): void {
+  if (printCaptureSink) {
+    printCaptureSink(html);
+    return;
+  }
   const existing = document.getElementById(frameId);
   if (existing) existing.remove();
 

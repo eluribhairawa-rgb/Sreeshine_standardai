@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { apiFetch, reportError } from "../lib/api";
 import { formatPhone, splitStoredPhone, toWhatsAppNumber } from "../lib/phone";
 import { generatePDFBlob, downloadPDF, printPDF, patientFilename } from "../lib/exportService";
+import { sharePdfFile } from "../lib/whatsappPdfShare";
 import type { StandardPdfPayload } from "../lib/exportService";
 import { Button, Modal } from "../components/ui";
 import type { Notice, Patient } from "../types";
@@ -174,7 +175,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
   const [dueOpen, setDueOpen] = useState(false);
   const [payMode, setPayMode] = useState("");
   const [paying, setPaying] = useState(false);
-  const [exporting, setExporting] = useState<"" | "pdf" | "print">("");
+  const [exporting, setExporting] = useState<"" | "pdf" | "print" | "whatsapp">("");
   const [reportModal, setReportModal] = useState<{ title: string; loading: boolean; content: Record<string, unknown> | null } | null>(null);
 
   useEffect(() => {
@@ -491,16 +492,22 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
 
   const patient = journey?.patient;
 
-  const handleShareWhatsApp = () => {
+  // Sends the patient journey PDF (same document as Download PDF) to the patient's WhatsApp.
+  const handleShareWhatsApp = async () => {
     if (!patient) return;
-    const parts = splitStoredPhone(patient.phone, patient.phone_country_code);
-    const number = toWhatsAppNumber(parts.countryCode, parts.value);
-    if (!number) {
-      setNotice({ type: "warning", message: "This patient has no primary mobile number on record." });
-      return;
+    setExporting("whatsapp");
+    try {
+      const { blob, filename } = await generatePDFBlob(buildPdfPayload(), { dated: false });
+      await sharePdfFile({
+        blob, filename, title: `Patient Journey - ${patient.name}`,
+        text: `Hello ${patient.name}, please find your visit summary attached. Your patient number (UHID) is ${patient.patient_id}.`,
+        phone: patient.phone, phoneCountryCode: patient.phone_country_code,
+      }, setNotice);
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to create the journey PDF." });
+    } finally {
+      setExporting("");
     }
-    const msg = `Hello ${patient.name}, your patient number (UHID) at our hospital is ${patient.patient_id}. Please quote it on every visit.`;
-    window.open(`https://wa.me/${number}?text=${encodeURIComponent(msg)}`, "_blank", "noopener,noreferrer");
   };
   const selected = journey?.selected;
   const fs = journey?.financial_summary;
@@ -582,7 +589,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                   className="pharmacy-btn-outline" style={{ height: "38px", padding: "0 16px", opacity: journey ? 1 : 0.5 }}>
             {exporting === "pdf" ? "Preparing…" : "Download PDF"}
           </button>
-          <button type="button" onClick={handleShareWhatsApp} disabled={!journey}
+          <button type="button" onClick={() => void handleShareWhatsApp()} disabled={!journey}
                   className="pharmacy-btn-outline" style={{ height: "38px", padding: "0 16px", opacity: journey ? 1 : 0.5 }}>
             💬 Share via WhatsApp
           </button>

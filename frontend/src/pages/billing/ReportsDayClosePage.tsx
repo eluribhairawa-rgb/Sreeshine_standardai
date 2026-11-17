@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from "react";
+import { sharePrintAsPdfOnWhatsApp } from "../../lib/whatsappPdfShare";
 import type { Dispatch, SetStateAction } from "react";
 import { apiFetch, reportError } from "../../lib/api";
 import type { Notice } from "../../types";
@@ -308,6 +309,18 @@ export default function ReportsDayClosePage({ setNotice, onNavigate }: Props) {
     ].filter(Boolean);
 
     const text = lines.join("\n");
+
+    // Send the printed document itself as a PDF (WhatsApp links can only carry text); the summary
+
+    // above goes along as the message. Falls back to the text-only message below.
+
+    if (sharePrintAsPdfOnWhatsApp(() => printReceipt(r), {
+
+      filename: `Receipt_${r.receipt_no || r.reference || r.id || ""}`, title: "Payment Receipt", text,
+
+      phone: parts.value, phoneCountryCode: parts.countryCode,
+
+    }, setNotice)) return;
     const url = waNumber
       ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
       : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;

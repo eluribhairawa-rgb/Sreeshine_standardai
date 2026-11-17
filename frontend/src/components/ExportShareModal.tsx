@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Modal, Button } from "./ui";
 import { downloadPDF, printPDF } from "../lib/exportService";
-import { splitStoredPhone, toWhatsAppNumber } from "../lib/phone";
+import { canShareFiles, downloadAndOpenWhatsApp } from "../lib/whatsappPdfShare";
 
 type ExportShareModalProps = {
   open: boolean;
@@ -46,20 +46,23 @@ export default function ExportShareModal({ open, onClose, options }: ExportShare
     }
   };
 
-  const handleWhatsApp = () => {
-    const parts = splitStoredPhone(phone, phoneCountryCode);
-    const waNumber = toWhatsAppNumber(parts.countryCode, parts.value);
-    const messageLines = [
-      `*HospAI Hospital - ${title || "Report / Document"}*`,
-      text || "",
-      shareUrl ? `View Online: ${shareUrl}` : "",
-      `Generated: ${new Date().toLocaleDateString("en-IN")}`,
-    ].filter(Boolean);
-    const msg = messageLines.join("\n\n");
-    const url = waNumber
-      ? `https://wa.me/${waNumber}?text=${encodeURIComponent(msg)}`
-      : `https://api.whatsapp.com/send?text=${encodeURIComponent(msg)}`;
-    window.open(url, "_blank", "noopener,noreferrer");
+  // WhatsApp links can only carry text, so the PDF itself goes through the system share sheet (pick WhatsApp
+  // there). This click is a fresh user gesture, which the browser requires for sharing files.
+  const handleWhatsApp = async () => {
+    const pdfName = /\.pdf$/i.test(filename) ? filename : `${filename}.pdf`;
+    const message = [title || "Report / Document", text || "", shareUrl ? `View Online: ${shareUrl}` : ""].filter(Boolean).join("\n\n");
+    if (canShareFiles()) {
+      try {
+        const file = new File([blob], pdfName, { type: "application/pdf" });
+        await navigator.share({ files: [file], title: title || pdfName, text: message } as ShareData);
+        onClose();
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return; // closed the share sheet
+      }
+    }
+    // No file sharing in this browser: download the PDF and open the chat to attach it.
+    downloadAndOpenWhatsApp({ blob, filename: pdfName, title: title || "Document", text: message, phone, phoneCountryCode });
     onClose();
   };
 
@@ -83,7 +86,7 @@ export default function ExportShareModal({ open, onClose, options }: ExportShare
 
         <Button
           type="button"
-          onClick={handleWhatsApp}
+          onClick={() => void handleWhatsApp()}
           style={{
             width: "100%",
             justifyContent: "center",
@@ -96,7 +99,7 @@ export default function ExportShareModal({ open, onClose, options }: ExportShare
             gap: "8px",
           }}
         >
-          💬 Share via WhatsApp
+          💬 Share PDF via WhatsApp
         </Button>
 
         <Button

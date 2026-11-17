@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { shareHtmlAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
+import { patientFilename } from "../lib/exportService";
 import PhoneInput from "../components/PhoneInput";
 import { cleanCountryCode, toWhatsAppNumber, validateMobileByCountry } from "../lib/phone";
 import type { Dispatch, SetStateAction } from "react";
@@ -302,6 +304,19 @@ export default function LabDiagnosticsReportsPage({ setNotice, onNavigate }: Pro
     const phoneError = validateMobileByCountry(whatsAppPhone, whatsAppPhoneCode, true);
     if (phoneError) {
       setNotice({ type: "warning", message: phoneError });
+      return;
+    }
+    if (selected) {
+      // Send the report itself as a PDF (same document as Print); the message goes along with it.
+      const patient = selected.order_item?.patient;
+      void shareHtmlAsPdfOnWhatsApp(buildReportPrintHtml(selected, contentDraft), {
+        filename: patientFilename(patient ? `${patient.name || ""} ${(patient as any).last_name || ""}` : "", patient?.patient_id, `Report_${selected.order_item?.service_name || selected.id}`),
+        title: `Report - ${selected.order_item?.service_name || "Lab / Diagnostics"}`,
+        text: whatsAppMessage,
+        phone: whatsAppPhone,
+        phoneCountryCode: whatsAppPhoneCode,
+      }, setNotice);
+      setWhatsAppModalOpen(false);
       return;
     }
     const countryCoded = toWhatsAppNumber(whatsAppPhoneCode, whatsAppPhone);

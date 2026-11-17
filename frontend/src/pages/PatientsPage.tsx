@@ -11,6 +11,7 @@ import { apiFetch, reportError } from "../lib/api";
 import { calculateAgeFromDob, formatDate, formatDateTimeIST, getISTDateTimeKey, getTimestamp, stripUploadTimestampPrefix } from "../lib/format";
 import { printViaIframe } from "../lib/printViaIframe";
 import { exportPDF, downloadPDF, patientFilename } from "../lib/exportService";
+import { shareHtmlAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
 import { PRINT_BRAND_HEADER_DATA_URI, PRINT_WATERMARK_DATA_URI } from "../lib/printBrand";
 import type { Admission, BedAllocation, Certificate, DocumentItem, Encounter, MedicationSchedule, Notice, ObservationNote, Patient, PatientMovement, PatientVital } from "../types";
 
@@ -1262,8 +1263,7 @@ function PatientDetail({
     }
   };
 
-  const handlePrintCertificate = (certificate: Certificate) => {
-    const html = `<!doctype html>
+  const buildCertificateHtml = (certificate: Certificate) => `<!doctype html>
       <html>
         <head>
           <meta charset="utf-8" />
@@ -1286,37 +1286,22 @@ function PatientDetail({
           <div class="certificate-body">${certificate.body ? certificate.body.replace(/</g, "&lt;").replace(/>/g, "&gt;") : ""}</div>
         </body>
       </html>`;
-    printViaIframe(html);
+
+  const handlePrintCertificate = (certificate: Certificate) => {
+    printViaIframe(buildCertificateHtml(certificate));
   };
 
+  // Sends the certificate itself as a PDF (same document as Print).
   const handleShareWhatsAppCertificate = (certificate: Certificate) => {
     if (!patient) return;
-    const parts = splitStoredPhone(patient.phone, patient.phone_country_code);
-    const waNumber = toWhatsAppNumber(parts.countryCode, parts.value);
-
-    const lines = [
-      `*HospAI Hospital - ${certificate.title || "Medical Certificate"}*`,
-      `----------------------------------------`,
-      `Patient: ${patient.name} (UHID: ${patient.patient_id})`,
-      `Type: ${certificate.certificate_type.replace(/_/g, " ")}`,
-      certificate.admission_id ? `Admission: #${certificate.admission_id}` : "",
-      certificate.issued_by ? `Issued by: ${certificate.issued_by}` : "",
-      certificate.created_at ? `Date: ${formatDateTimeIST(certificate.created_at)}` : "",
-      `----------------------------------------`,
-      certificate.body ? certificate.body : "",
-      `----------------------------------------`,
-      `Valid hospital document issued by HospAI Hospital.`,
-    ].filter(Boolean);
-
-    const text = lines.join("\n");
-    const url = waNumber
-      ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
-      : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, "_blank", "noopener,noreferrer");
-    setNotice({
-      type: "success",
-      message: waNumber ? `WhatsApp chat opened for ${parts.countryCode} ${parts.value}.` : "WhatsApp opened.",
-    });
+    const title = certificate.title || "Medical Certificate";
+    void shareHtmlAsPdfOnWhatsApp(buildCertificateHtml(certificate), {
+      filename: patientFilename(patient.name, patient.patient_id, title),
+      title,
+      text: `${title} for ${patient.name} (UHID: ${patient.patient_id}).`,
+      phone: patient.phone,
+      phoneCountryCode: patient.phone_country_code,
+    }, setNotice);
   };
 
   const documentGroups = useMemo(() => {

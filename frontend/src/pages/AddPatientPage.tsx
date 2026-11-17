@@ -4,6 +4,8 @@ import type { Dispatch, SetStateAction } from "react";
 import type { Notice, Patient, PatientForm } from "../types";
 import { apiFetch, reportError } from "../lib/api";
 import { printViaIframe } from "../lib/printViaIframe";
+import { patientFilename } from "../lib/exportService";
+import { shareHtmlAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
 import { calculateAgeFromDob, filterDecimal, filterPercent, percentOf, preventNonNumericDiscountKeys } from "../lib/format";
 import { doctorsInDepartment, useDoctorDirectory } from "../lib/doctorDirectory";
 import { Modal } from "../components/ui";
@@ -928,7 +930,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     void fetchNextUhid();
   };
 
-  const handlePrintSlip = () => {
+  // Registration & token slip HTML (shared by Print and WhatsApp PDF); null when no patient is registered yet.
+  const buildSlipHtml = (): string | null => {
     const target = lastRegisteredPatient || (patientId ? {
       patientId,
       name: `${firstName.trim()} ${lastName.trim()}`.trim(),
@@ -945,7 +948,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
 
     if (!target?.patientId) {
       setNotice({ type: "warning", message: "Please register a patient first before printing the slip." });
-      return;
+      return null;
     }
     const tokenPart = bookedAppointment?.tokenNo || target.tokenNo;
     const slipHtml = `
@@ -980,7 +983,12 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         </div>
       </div>
     `;
-    printViaIframe(slipHtml);
+    return slipHtml;
+  };
+
+  const handlePrintSlip = () => {
+    const html = buildSlipHtml();
+    if (html) printViaIframe(html);
   };
 
   // Blank prescription pad for the doctor: only patient identity, doctor, department, date/time and the Rx symbol.
@@ -1053,36 +1061,16 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
 
     const targetPhone = (target as any).phone || primaryPhone;
     const targetCode = (target as any).phoneCountryCode || (target as any).phone_country_code || primaryCountryCode.match(/\+\d+/)?.[0] || "+91";
-    const parts = splitStoredPhone(targetPhone, targetCode);
-    const waNumber = toWhatsAppNumber(parts.countryCode, parts.value);
-    const tokenPart = bookedAppointment?.tokenNo || (target as any).tokenNo;
-
-    const lines = [
-      `*HospAI Hospital - Registration & Appointment Token Slip*`,
-      `----------------------------------------`,
-      `UHID: ${target.patientId}`,
-      tokenPart ? `Live Queue Token: #${tokenPart}` : "",
-      `Date: ${new Date().toLocaleDateString("en-GB")}`,
-      `Patient Name: ${target.name}`,
-      `Contact: ${parts.countryCode} ${parts.value}`,
-      `Visit Type: ${target.visitType}`,
-      target.department || selectedDepartment ? `Department: ${target.department || selectedDepartment}` : "",
-      target.doctor || selectedDoctor ? `Consulting Doctor: ${target.doctor || selectedDoctor}` : "",
-      target.fee !== undefined ? `Consultation Fee: ₹ ${target.fee ?? consultationFee}` : "",
-      `----------------------------------------`,
-      `Please present this token at the consultation desk or nursing counter.`,
-      `Wishing you good health!`,
-    ].filter(Boolean);
-
-    const text = lines.join("\n");
-    const url = waNumber
-      ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
-      : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, "_blank", "noopener,noreferrer");
-    setNotice({
-      type: "success",
-      message: waNumber ? `WhatsApp chat opened for ${parts.countryCode} ${parts.value}.` : "WhatsApp opened.",
-    });
+    const html = buildSlipHtml();
+    if (!html) return;
+    // The slip itself goes as a PDF (same document as Print Token & Slip).
+    void shareHtmlAsPdfOnWhatsApp(html, {
+      filename: patientFilename(target.name, target.patientId, "Token_Slip"),
+      title: "Registration & Token Slip",
+      text: `Registration & token slip for ${target.name} (UHID: ${target.patientId}). Please present it at the consultation desk.`,
+      phone: targetPhone,
+      phoneCountryCode: targetCode,
+    }, setNotice);
   };
 
   const todayFormatted = new Intl.DateTimeFormat("en-GB", {

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { shareHtmlAsPdfOnWhatsApp, sharePrintAsPdfOnWhatsApp } from "../../lib/whatsappPdfShare";
 import type { Dispatch, SetStateAction } from "react";
 import { apiFetch, reportError } from "../../lib/api";
 import type { Notice } from "../../types";
@@ -318,6 +319,18 @@ export default function PatientBillsPaymentsPage({ setNotice, onNavigate, select
     ].filter(Boolean);
 
     const text = lines.join("\n");
+
+    // Send the printed document itself as a PDF (WhatsApp links can only carry text); the summary
+
+    // above goes along as the message. Falls back to the text-only message below.
+
+    if (sharePrintAsPdfOnWhatsApp(() => handlePrintReceipt(rcp), {
+
+      filename: `Receipt_${rcp.receipt_no || rcp.reference || rcp.id || ""}`, title: "Payment Receipt", text,
+
+      phone: parts.value, phoneCountryCode: parts.countryCode,
+
+    }, setNotice)) return;
     const url = waNumber
       ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
       : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
@@ -349,6 +362,30 @@ export default function PatientBillsPaymentsPage({ setNotice, onNavigate, select
     ].filter(Boolean);
 
     const text = lines.join("\n");
+    // Send the bill as a PDF; falls back to the text-only message below.
+    const inr = (n: unknown) => `\u20B9${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+    const due = Number(bill.due_amount ?? bill.balance ?? 0);
+    const billHtml = buildPrintDocumentHtml({
+      title: "Bill Details",
+      subtitleLines: [`Invoice: ${bill.invoice_no || "-"}`, `Date: ${new Date(bill.created_at || Date.now()).toLocaleDateString("en-IN")}`],
+      meta: [
+        { label: "Patient Name", value: String(p?.name || "-") },
+        { label: "UHID", value: String(p?.patient_id || "-") },
+        { label: "Invoice No.", value: String(bill.invoice_no || "-") },
+        { label: "Module", value: String(bill.module || "-") },
+      ],
+      columns: ["Description", "Total", "Paid", "Due", "Status"],
+      rows: [[`${bill.module || "Hospital"} services`, inr(bill.total_amount), inr(bill.paid_amount ?? Number(bill.total_amount || 0) - due), inr(due), due <= 0 ? "PAID" : "UNPAID"]],
+      totals: [
+        { label: "Total Amount", value: inr(bill.total_amount) },
+        { label: "Due Amount", value: inr(due), grand: true },
+      ],
+    });
+    void shareHtmlAsPdfOnWhatsApp(billHtml, {
+      filename: `Bill_${bill.invoice_no || bill.id || ""}`, title: `Bill ${bill.invoice_no || ""}`.trim(), text,
+      phone: parts.value, phoneCountryCode: parts.countryCode,
+    }, setNotice);
+    return;
     const url = waNumber
       ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
       : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;

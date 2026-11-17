@@ -8,6 +8,8 @@ import type { DoctorSchedule, Notice } from "../types";
 import BrandLogo from "../components/BrandLogo";
 import { escapeBrandText, fitMm, useBranding } from "../lib/branding";
 import { buildHospaiPrintFooterCss, printViaIframe } from "../lib/printViaIframe";
+import { patientFilename } from "../lib/exportService";
+import { shareElementAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
 
 type Props = {
   setNotice: Dispatch<SetStateAction<Notice | null>>;
@@ -1671,16 +1673,20 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
       `Wishing you good health & a speedy recovery! Valid electronic prescription.`,
     ].filter(Boolean).join("\n");
 
-    const stored = splitStoredPhone(patientPhone, patientPhoneCode);
-    const countryCoded = toWhatsAppNumber(stored.countryCode, stored.value);
-    const url = countryCoded
-      ? `https://wa.me/${countryCoded}?text=${encodeURIComponent(text)}`
-      : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, "_blank");
-    setNotice({
-      type: "success",
-      message: `WhatsApp launched with digital prescription for ${patientName}!`,
-    });
+    // Send the prescription sheet itself as a PDF (the same branded A4 sheet that is printed);
+    // the text summary above goes along as the message.
+    const sheet = printSheetRef.current;
+    if (!sheet) {
+      setNotice({ type: "error", message: "The prescription sheet is not ready yet." });
+      return;
+    }
+    void shareElementAsPdfOnWhatsApp(sheet, {
+      filename: patientFilename(patientName, patientUhid, `Prescription_${new Date().toLocaleDateString("en-CA")}`),
+      title: `Prescription - ${patientName}`,
+      text,
+      phone: patientPhone,
+      phoneCountryCode: patientPhoneCode,
+    }, setNotice);
   };
 
   // Live search registered patients as user types

@@ -12,6 +12,7 @@ import { PRINT_BRAND_HEADER_DATA_URI } from "../lib/printBrand";
 import { printViaIframe } from "../lib/printViaIframe";
 import { splitStoredPhone, toWhatsAppNumber } from "../lib/phone";
 import { generatePDFBlob, downloadPDF, patientFilename } from "../lib/exportService";
+import { sharePdfFile } from "../lib/whatsappPdfShare";
 
 export type BillingView =
   | "aging"
@@ -702,8 +703,8 @@ export default function BillingPage({ setNotice, view = "record-payment" }: Prop
     printViaIframe(html);
   };
 
-  const handleDownloadInvoicePdf = async (invoice: Invoice) => {
-    try {
+  // The invoice PDF (same document for Download and WhatsApp).
+  const buildInvoicePdf = async (invoice: Invoice) => {
       const paid = invoice.total_amount - invoice.due_amount;
       // Invoices only carry the UHID; look the patient up for the name (PDF + file name).
       let patientName = "";
@@ -748,7 +749,12 @@ export default function BillingPage({ setNotice, view = "record-payment" }: Prop
           },
         ],
       };
-      const { blob, filename } = await generatePDFBlob(payload, { dated: false });
+      return generatePDFBlob(payload, { dated: false });
+  };
+
+  const handleDownloadInvoicePdf = async (invoice: Invoice) => {
+    try {
+      const { blob, filename } = await buildInvoicePdf(invoice);
       downloadPDF(blob, filename);
     } catch {
       setNotice({ type: "error", message: "Failed to generate Invoice PDF" });
@@ -772,34 +778,17 @@ export default function BillingPage({ setNotice, view = "record-payment" }: Prop
       }
     }
 
-    const parts = splitStoredPhone(phone, phoneCode);
-    const waNumber = toWhatsAppNumber(parts.countryCode, parts.value);
-    const paid = invoice.total_amount - invoice.due_amount;
-
-    const lines = [
-      `*HospAI Hospital - Invoice #${invoice.invoice_no || `INV-${invoice.id}`}*`,
-      `----------------------------------------`,
-      patientName ? `Patient: ${patientName}` : "",
-      invoice.patient_id ? `UHID: ${invoice.patient_id}` : "",
-      `Department / Module: ${invoice.module || "Hospital Billing"}`,
-      `Total Amount: ${formatCurrency(invoice.total_amount)}`,
-      `Paid Amount: ${formatCurrency(paid)}`,
-      `Due Amount: ${formatCurrency(invoice.due_amount)}`,
-      `Status: ${invoice.payment_status || "Pending"}`,
-      `Date: ${formatDateTime(invoice.created_at)}`,
-      `----------------------------------------`,
-      `Thank you for choosing HospAI Hospital. Keep this invoice for your records.`,
-    ].filter(Boolean);
-
-    const text = lines.join("\n");
-    const url = waNumber
-      ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
-      : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, "_blank", "noopener,noreferrer");
-    setNotice({
-      type: "success",
-      message: waNumber ? `WhatsApp chat opened for ${parts.countryCode} ${parts.value}.` : "WhatsApp opened.",
-    });
+    try {
+      const { blob, filename } = await buildInvoicePdf(invoice);
+      const invNo = invoice.invoice_no || `INV-${invoice.id}`;
+      await sharePdfFile({
+        blob, filename, title: `Invoice ${invNo}`,
+        text: `Invoice ${invNo}${patientName ? ` for ${patientName}` : ""} — ${formatCurrency(invoice.total_amount)} (due ${formatCurrency(invoice.due_amount)}).`,
+        phone, phoneCountryCode: phoneCode,
+      }, setNotice);
+    } catch {
+      setNotice({ type: "error", message: "Failed to generate the invoice PDF for WhatsApp." });
+    }
   };
 
   const handleRecordPayment = async (event: FormEvent<HTMLFormElement>) => {

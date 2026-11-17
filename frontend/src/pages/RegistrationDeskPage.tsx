@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { sharePrintAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Label, Select, Textarea } from "../components/ui";
 import { apiFetch, reportError } from "../lib/api";
@@ -232,6 +233,11 @@ function shareConsentWhatsApp(form: typeof DEFAULT_CONSENT_FORM, setNotice: Disp
   ].filter(Boolean);
 
   const text = lines.join("\n");
+  // Send the printed document itself as a PDF; falls back to the text-only message below.
+  if (sharePrintAsPdfOnWhatsApp(() => printConsentDocument(form, setNotice), {
+    filename: `Consent_${form.patient_id || form.patient_name || ""}`, title: "Consent Form", text,
+    phone: parts.value, phoneCountryCode: parts.countryCode,
+  }, setNotice)) return;
   const url = waNumber
     ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
     : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
@@ -263,6 +269,11 @@ function shareInsuranceWhatsApp(form: typeof DEFAULT_INSURANCE_FORM & Record<str
   ].filter(Boolean);
 
   const text = lines.join("\n");
+  // Send the printed document itself as a PDF; falls back to the text-only message below.
+  if (sharePrintAsPdfOnWhatsApp(() => printInsuranceDocument(form, setNotice), {
+    filename: `Insurance_Verification_${form.patient_id || form.patient_name || ""}`, title: "Insurance Verification", text,
+    phone: parts.value, phoneCountryCode: parts.countryCode,
+  }, setNotice)) return;
   const url = waNumber
     ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
     : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
@@ -292,6 +303,11 @@ function shareRegistrationTokenWhatsApp(token: any, setNotice: Dispatch<SetState
   ].filter(Boolean);
 
   const text = lines.join("\n");
+  // Send the printed document itself as a PDF; falls back to the text-only message below.
+  if (sharePrintAsPdfOnWhatsApp(() => printRegistrationToken(token, setNotice), {
+    filename: `Registration_Token_${token.patient_id || ""}`, title: "Registration Token", text,
+    phone: parts.value, phoneCountryCode: parts.countryCode,
+  }, setNotice)) return;
   const url = waNumber
     ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
     : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;

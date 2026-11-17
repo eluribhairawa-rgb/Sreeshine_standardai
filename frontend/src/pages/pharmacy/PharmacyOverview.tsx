@@ -6,6 +6,7 @@ import type { Notice, Patient } from "../../types";
 import DateCalendarPicker, { toIsoDate, parseIsoDate } from "../../components/DateCalendarPicker";
 import { DonutChart } from "../../components/charts";
 import { printViaIframe } from "../../lib/printViaIframe";
+import { sharePrintAsPdfOnWhatsApp } from "../../lib/whatsappPdfShare";
 import { buildPrintDocumentHtml } from "../../lib/printTemplates";
 import { printPharmacyCreditNoteById, printPharmacyInvoiceById } from "../../lib/pharmacyInvoicePrint";
 
@@ -651,6 +652,11 @@ export default function PharmacyOverview({ setNotice, onNavigate }: Props) {
     ].filter(Boolean);
 
     const text = lines.join("\n");
+    // Send the printed report itself as a PDF; falls back to the text-only message below.
+    if (sharePrintAsPdfOnWhatsApp(() => handlePrintRecentOperations(), {
+      filename: `Pharmacy_Recent_Operations_${new Date().toLocaleDateString("en-CA")}`,
+      title: "Recent Pharmacy Operations", text,
+    }, setNotice)) return;
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     window.open(url, "_blank", "noopener,noreferrer");
     setNotice({ type: "success", message: "WhatsApp opened with Recent Pharmacy Operations." });
