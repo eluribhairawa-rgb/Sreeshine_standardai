@@ -1,0 +1,1228 @@
+import { useState, useEffect, useMemo } from "react";
+import { brandTitle, escapeBrandText } from "../lib/branding";
+import type { Dispatch, SetStateAction } from "react";
+import type { Notice } from "../types";
+import { apiFetch, reportError } from "../lib/api";
+import { printViaIframe } from "../lib/printViaIframe";
+import { formatPhone, splitStoredPhone, toWhatsAppNumber } from "../lib/phone";
+import { fullPatientName } from "../lib/patientLookup";
+import { Button, Input, Label, Modal } from "../components/ui";
+import PatientSearchPicker from "../components/PatientSearchPicker";
+import type { HospitalBed } from "./BedManagementPage";
+import { doctorsInDepartment, useDoctorDirectory } from "../lib/doctorDirectory";
+import AdmissionPayerFields, { EMPTY_PAYER, payerError, payerLabel } from "../components/AdmissionPayerFields";
+import type { AdmissionPayer } from "../components/AdmissionPayerFields";
+
+type Props = {
+  setNotice: Dispatch<SetStateAction<Notice | null>>;
+  onNavigate?: (pageId: string) => void;
+};
+
+type SelectedPatient = {
+  uhid: string;
+  patientName: string;
+  ageGender: string;
+  mobile: string;
+};
+
+/** Registration details shown with the selected patient and used to pre-fill the admission form. */
+type RegisteredDetails = {
+  bloodGroup?: string; allergies?: string; address?: string; insurance?: string; symptoms?: string; vitals?: string;
+};
+
+type DoctorOrder = {
+  doctor: string;
+  department: string;
+  date: string;
+};
+
+const DEFAULT_ADMISSION_TYPES = [
+  "Planned / Elective",
+  "Emergency",
+  "Day Care Surgery",
+  "Inter-facility Transfer",
+];
+
+export default function InpatientAdmissionPage({ setNotice, onNavigate }: Props) {
+  // The patient being admitted -- always an already-registered patient,
+  // found by search. Registration itself happens once, at the Registration
+  // Desk (AddPatientPage); this page only records the doctor's admission
+  // order and allocates a bed, it never creates a new patient.
+  const [selectedPatient, setSelectedPatient] = useState<SelectedPatient | null>(null);
+  const [registered, setRegistered] = useState<RegisteredDetails | null>(null);
+  const [doctorOrder, setDoctorOrder] = useState<DoctorOrder | null>(null);
+  const [loadingOrder, setLoadingOrder] = useState(false);
+
+  // Clinical Admission Details (the doctor's order, recorded by staff)
+  // Departments and doctors come only from the Doctor Scheduling module.
+  const { departments: scheduledDepartments, doctors: scheduledDoctors, loading: directoryLoading } = useDoctorDirectory();
+  const [department, setDepartment] = useState("");
+  const [consultingDoctor, setConsultingDoctor] = useState("");
+
+  // Manageable admission types with localStorage persistence
+  const [customAdmissionTypes, setCustomAdmissionTypes] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("hospai_custom_admission_types");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const saveCustomTypes = (types: string[]) => {
+    setCustomAdmissionTypes(types);
+    try {
+      localStorage.setItem("hospai_custom_admission_types", JSON.stringify(types));
+    } catch {
+      // ignore
+    }
+  };
+
+  const allAdmissionTypes = useMemo(() => {
+    const combined = [...DEFAULT_ADMISSION_TYPES];
+    for (const c of customAdmissionTypes) {
+      if (!combined.includes(c)) combined.push(c);
+    }
+    return combined;
+  }, [customAdmissionTypes]);
+
+  const [admissionType, setAdmissionType] = useState("");
+  const [isCustomTypeMode, setIsCustomTypeMode] = useState(false);
+  const [isManageTypesOpen, setIsManageTypesOpen] = useState(false);
+  const [newTypeInput, setNewTypeInput] = useState("");
+
+  const [triagePriority, setTriagePriority] = useState<"" | "Critical" | "Urgent" | "Stable">("");
+  const [reasonForAdmission, setReasonForAdmission] = useState("");
+  const [expectedStay, setExpectedStay] = useState("");
+  const [notes, setNotes] = useState("");
+  // Who pays for this stay -- prefilled from the patient's insurance on record.
+  const [payer, setPayer] = useState<AdmissionPayer>(EMPTY_PAYER);
+
+  // Bed Allocation
+  const [wardFilter, setWardFilter] = useState("All Wards");
+  const [selectedBedNo, setSelectedBedNo] = useState("");
+  const [availableBeds, setAvailableBeds] = useState<HospitalBed[]>([]);
+  const [loadingBeds, setLoadingBeds] = useState(false);
+
+  // Confirmed admission record, for the confirmation panel / slip printing
+  const [admittedRecord, setAdmittedRecord] = useState<any>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const loadBeds = async () => {
+    setLoadingBeds(true);
+    try {
+      const res = await apiFetch<{ beds: HospitalBed[] }>("/api/beds?status=available");
+      setAvailableBeds(res.beds || []);
+    } catch {
+      // Fallback
+    } finally {
+      setLoadingBeds(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadBeds();
+    // App remounts a page right after navigating to it (key bump), so the first
+    // instance can be discarded mid-fetch. Only consume the handoff once an
+    // instance that is still mounted has applied it; otherwise leave it for the
+    // next mount.
+    let cancelled = false;
+    const saved = localStorage.getItem("selected_admission_patient");
+    if (saved) {
+      apiFetch<any>(`/api/patients/${encodeURIComponent(saved)}`)
+        .then((res) => {
+          if (cancelled) return;
+          const p = res?.patient || res;
+          if (p && (p.patient_id || p.uhid)) {
+            localStorage.removeItem("selected_admission_patient");
+            void handleSelectPatient({
+              uhid: p.patient_id || p.uhid,
+              patientName: fullPatientName(p) || p.patient_id,
+              ageGender: `${p.age ? p.age + " yrs" : "-"} / ${p.gender || "-"}`,
+              mobile: p.phone ? formatPhone(p.phone_country_code, p.phone) : "-",
+            });
+            setNotice({ type: "success", message: `Registered patient ${fullPatientName(p) || p.patient_id} (${p.patient_id}) selected and their registration details filled in.` });
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The department/doctor from the patient's appointment stay selectable even if
+  // that doctor has since gone on leave or the department was renamed.
+  const departmentOptions = useMemo(() => {
+    const list = [...scheduledDepartments];
+    if (doctorOrder?.department && !list.some((d) => d.toLowerCase() === doctorOrder.department.toLowerCase())) list.push(doctorOrder.department);
+    return list;
+  }, [scheduledDepartments, doctorOrder]);
+
+  const filteredDoctors = useMemo(() => {
+    const list = doctorsInDepartment(scheduledDoctors, department).map((d) => ({ doctor_name: d.doctor_name, department: d.department }));
+    if (
+      doctorOrder?.doctor && doctorOrder.department.toLowerCase() === department.toLowerCase() &&
+      !list.some((d) => d.doctor_name === doctorOrder.doctor)
+    ) {
+      list.push({ doctor_name: doctorOrder.doctor, department: doctorOrder.department });
+    }
+    return list;
+  }, [scheduledDoctors, department, doctorOrder]);
+
+  // Keep the doctor consistent with the department: clear a doctor from another
+  // department, and pick the only doctor automatically when there is just one.
+  useEffect(() => {
+    if (directoryLoading) return;
+    if (consultingDoctor && !filteredDoctors.some((d) => d.doctor_name === consultingDoctor)) {
+      setConsultingDoctor(filteredDoctors.length === 1 ? filteredDoctors[0].doctor_name : "");
+    } else if (!consultingDoctor && filteredDoctors.length === 1) {
+      setConsultingDoctor(filteredDoctors[0].doctor_name);
+    }
+  }, [directoryLoading, filteredDoctors, consultingDoctor]);
+
+  // Filtered available beds
+  const displayBeds = useMemo(() => {
+    if (wardFilter === "All Wards") return availableBeds;
+    return availableBeds.filter((b) => b.ward.toLowerCase().includes(wardFilter.toLowerCase()));
+  }, [availableBeds, wardFilter]);
+
+  const chosenBed = availableBeds.find((b) => b.bed_no === selectedBedNo);
+
+  // When staff selects a patient, look up their most recent IP pre-admission
+  // appointment (booked at Registration Desk) so the department/doctor
+  // fields reflect the doctor's actual order instead of an arbitrary
+  // receptionist pick.
+  const handleSelectPatient = async (pat: SelectedPatient) => {
+    setSelectedPatient(pat);
+    setAdmittedRecord(null);
+    setDoctorOrder(null);
+    setPayer(EMPTY_PAYER);
+    setRegistered(null);
+    // Details captured at registration: shown on the patient card and used to pre-fill the form.
+    apiFetch<{ vitals?: any[] }>(`/api/patients/${encodeURIComponent(pat.uhid)}/vitals`)
+      .then((vr) => {
+        const v = (vr?.vitals || [])[0];
+        if (!v) return;
+        const text = [v.bp ? `BP ${v.bp}` : "", v.pulse ? `Pulse ${v.pulse}` : "", v.temperature ? `Temp ${v.temperature}` : "", v.spo2 ? `SpO2 ${v.spo2}%` : "",
+                      v.weight ? `Weight ${v.weight} kg` : "", v.height ? `Height ${v.height} cm` : ""].filter(Boolean).join(" · ");
+        if (text) setRegistered((prev) => ({ ...(prev || {}), vitals: text }));
+      })
+      .catch(() => {});
+    apiFetch<any>(`/api/patients/${encodeURIComponent(pat.uhid)}`)
+      .then((res) => {
+        const p = res?.patient || res;
+        if (p) {
+          setRegistered((prev) => ({
+            ...(prev || {}),
+            bloodGroup: p.blood_group || undefined, allergies: p.allergies || undefined, address: p.address || undefined,
+            insurance: p.insurance_provider ? `${p.insurance_provider}${p.insurance_policy_no ? ` (Policy ${p.insurance_policy_no})` : ""}` : undefined,
+            symptoms: p.symptoms || undefined,
+          }));
+          // The symptoms taken at registration are the starting point for the reason for admission.
+          if (p.symptoms) setReasonForAdmission((current) => current || String(p.symptoms));
+        }
+        if (p?.insurance_provider) {
+          setPayer({
+            payer_type: "insurance",
+            insurance_provider: p.insurance_provider || "",
+            insurance_policy_no: p.insurance_policy_no || "",
+            insurance_preauth_no: "",
+          });
+        }
+      })
+      .catch(() => {});
+    setLoadingOrder(true);
+    try {
+      const res = await apiFetch<{ appointments?: any[] }>(
+        `/api/appointments?patient_id=${encodeURIComponent(pat.uhid)}`
+      );
+      const appts = res.appointments || [];
+      const latest = appts[appts.length - 1];
+      if (latest) {
+        const order: DoctorOrder = {
+          doctor: latest.doctor_name || "",
+          department: latest.department || "",
+          date: latest.appointment_date || "",
+        };
+        setDoctorOrder(order);
+        if (order.department) setDepartment(order.department);
+        if (order.doctor) setConsultingDoctor(order.doctor);
+      }
+    } catch {
+      // No appointment found is a normal outcome, not an error -- staff can
+      // still record the admission manually.
+    } finally {
+      setLoadingOrder(false);
+    }
+  };
+
+  // Resets the working admission form fields (patient search, clinical order,
+  // bed selection) without touching admittedRecord -- used both by the manual
+  // "Clear Form" action and automatically right after a successful admission
+  // so staff can move straight into the next patient without an extra click.
+  const resetWorkingFields = () => {
+    setSelectedPatient(null);
+    setRegistered(null);
+    setDoctorOrder(null);
+    setDepartment("");
+    setConsultingDoctor("");
+    setAdmissionType("");
+    setIsCustomTypeMode(false);
+    setTriagePriority("");
+    setReasonForAdmission("");
+    setExpectedStay("");
+    setNotes("");
+    setPayer(EMPTY_PAYER);
+    setSelectedBedNo("");
+  };
+
+  const handleClearForm = () => {
+    resetWorkingFields();
+    setAdmittedRecord(null);
+    setNotice({ type: "info", message: "Admission form reset." });
+  };
+
+  // ==========================================
+  // ADMIT ACTION -- records the doctor's clinical admission order and
+  // allocates a bed for an already-registered patient.
+  // ==========================================
+  const handleCompleteAdmission = async () => {
+    if (!selectedPatient?.uhid) {
+      setNotice({ type: "warning", message: "Please search and select a registered patient first." });
+      return;
+    }
+    if (!department) {
+      setNotice({ type: "warning", message: "Please select an admitting clinical department." });
+      return;
+    }
+    if (!consultingDoctor) {
+      setNotice({ type: "warning", message: "Please select a consulting doctor." });
+      return;
+    }
+    if (!admissionType.trim()) {
+      setNotice({ type: "warning", message: "Please select the admission type." });
+      return;
+    }
+    if (!triagePriority) {
+      setNotice({ type: "warning", message: "Please select the clinical acuity / triage." });
+      return;
+    }
+    if (!reasonForAdmission.trim()) {
+      setNotice({ type: "warning", message: "Please enter the clinical reason for inpatient admission." });
+      return;
+    }
+    const payerProblem = payerError(payer);
+    if (payerProblem) {
+      setNotice({ type: "warning", message: payerProblem });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const noteLines = [
+        `Admission type: ${admissionType}`,
+        `Department: ${department}`,
+        `Consulting doctor: ${consultingDoctor}`,
+        `Triage Acuity: ${triagePriority}`,
+        `Reason: ${reasonForAdmission.trim()}`,
+        expectedStay ? `Expected stay: ${expectedStay} day(s)` : null,
+        chosenBed ? `Allocated Bed: ${chosenBed.bed_no} (${chosenBed.ward})` : null,
+        notes.trim() ? `Notes: ${notes.trim()}` : null,
+      ].filter(Boolean);
+
+      const admRes = await apiFetch<{ admission_id?: number }>(`/api/patients/${encodeURIComponent(selectedPatient.uhid)}/admissions`, {
+        method: "POST",
+        body: JSON.stringify({
+          notes: noteLines.join(" | "),
+          payer_type: payer.payer_type,
+          insurance_provider: payer.insurance_provider.trim() || undefined,
+          insurance_policy_no: payer.insurance_policy_no.trim() || undefined,
+          insurance_preauth_no: payer.insurance_preauth_no.trim() || undefined,
+        }),
+      });
+
+      if (chosenBed) {
+        const stayDays = Math.max(1, Number(expectedStay) || 1);
+        await apiFetch("/api/bed/allot", {
+          method: "POST",
+          body: JSON.stringify({
+            patient_id: selectedPatient.uhid,
+            ward: chosenBed.ward,
+            room_no: chosenBed.room_no,
+            bed_no: chosenBed.bed_no,
+            amount_per_day: chosenBed.daily_rate,
+            total_days: stayDays,
+            total_amount: chosenBed.daily_rate * stayDays,
+            admission_id: admRes.admission_id,
+          }),
+        });
+      }
+
+      const confirmedRecord = {
+        uhid: selectedPatient.uhid,
+        patientName: selectedPatient.patientName,
+        ageGender: selectedPatient.ageGender,
+        mobile: selectedPatient.mobile,
+        admissionId: admRes.admission_id ? `ADM-${admRes.admission_id}` : "ADM-Confirmed",
+        admissionDate: new Date().toLocaleString("en-IN"),
+        department,
+        doctor: consultingDoctor,
+        admissionType,
+        ward: chosenBed ? chosenBed.ward : "Awaiting Bed Allotment",
+        bedNo: chosenBed ? chosenBed.bed_no : "Queued",
+        roomNo: chosenBed ? chosenBed.room_no : "-",
+        triagePriority,
+        reason: reasonForAdmission,
+        payer: payerLabel(payer),
+        policyNo: payer.payer_type === "insurance" ? payer.insurance_policy_no : "",
+        preauthNo: payer.payer_type === "insurance" ? payer.insurance_preauth_no : "",
+      };
+
+      setAdmittedRecord(confirmedRecord);
+      // Admission is recorded -- clear the working form right away so the
+      // next patient can be searched and admitted immediately instead of
+      // requiring a manual "Clear Form" click first.
+      resetWorkingFields();
+
+      setNotice({
+        type: "success",
+        message: `Inpatient Admission confirmed for ${confirmedRecord.patientName} (${confirmedRecord.uhid}) with Bed ${confirmedRecord.bedNo}!`,
+      });
+
+      void loadBeds();
+    } catch (err: any) {
+      reportError(setNotice, err, "Failed to complete inpatient admission.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Print Inpatient Admission Slip
+  const handlePrintSlip = () => {
+    if (!admittedRecord?.uhid) {
+      setNotice({ type: "warning", message: "Please complete the admission first before printing slip." });
+      return;
+    }
+    const rec = admittedRecord;
+    const slipHtml = `
+      <div data-hospai-shared-print-shell style="font-family: Arial, sans-serif; max-width: 520px; margin: 20px auto; padding: 24px; border: 2px solid #00828a; border-radius: 10px;">
+        <div style="text-align: center; border-bottom: 2px solid #00828a; padding-bottom: 12px; margin-bottom: 16px;">
+          <h2 style="margin: 0; color: #16324a;">${escapeBrandText(brandTitle())}</h2>
+          <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Inpatient Admission & Bed Allocation Slip</div>
+        </div>
+        <div style="font-size: 13.5px; line-height: 1.8; color: #1e293b;">
+          <div style="background: #f0fdf4; border: 1.5px solid #86efac; padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 10.5px; font-weight: 700; color: #15803d; text-transform: uppercase;">PATIENT UHID</div>
+              <strong style="font-size: 17px; color: #00828a; font-family: monospace;">${rec.uhid}</strong>
+            </div>
+            <div style="text-align: right;">
+              <div style="font-size: 10.5px; font-weight: 700; color: #15803d; text-transform: uppercase;">ADMISSION #</div>
+              <strong style="font-size: 15px; color: #15803d;">${rec.admissionId || "ADM-ACTIVE"}</strong>
+            </div>
+          </div>
+          <div><strong>Admission Date:</strong> ${rec.admissionDate || new Date().toLocaleString("en-IN")}</div>
+          <div><strong>Patient Name:</strong> ${rec.patientName}</div>
+          <div><strong>Age / Gender:</strong> ${rec.ageGender}</div>
+          <div><strong>Mobile:</strong> ${rec.mobile || "-"}</div>
+          <div style="border-top: 1px dashed #cbd5e1; margin: 10px 0; padding-top: 8px;">
+            <div><strong>Department:</strong> ${rec.department}</div>
+            <div><strong>Consulting Doctor:</strong> ${rec.doctor}</div>
+            <div><strong>Admission Type:</strong> ${rec.admissionType || "Planned / Elective"}</div>
+            <div><strong>Ward:</strong> ${rec.ward}</div>
+            <div><strong>Room / Bed No:</strong> ${rec.roomNo || "-"} / <span style="font-size: 15px; font-weight: 800; color: #2563eb;">${rec.bedNo}</span></div>
+            <div><strong>Acuity:</strong> ${rec.triagePriority || "Stable"}</div>
+            <div><strong>Reason:</strong> ${rec.reason || "-"}</div>
+            <div><strong>Payer:</strong> ${rec.payer || "Self-pay"}${rec.policyNo ? ` (Policy ${rec.policyNo})` : ""}${rec.preauthNo ? ` · Pre-auth ${rec.preauthNo}` : ""}</div>
+          </div>
+        </div>
+        <div style="text-align: center; margin-top: 18px; border-top: 1px solid #e2e8f0; padding-top: 10px; font-size: 11px; color: #64748b;">
+          ${escapeBrandText(brandTitle())} · 24x7 Inpatient Care & Bed Management · Computer Generated Slip
+        </div>
+      </div>
+    `;
+    // The slip keeps its own layout (data-hospai-shared-print-shell); printViaIframe adds the standard page footer.
+    printViaIframe(`<html><head><title>IP Admission Slip - ${rec.uhid}</title></head><body>${slipHtml}</body></html>`);
+  };
+
+  const handleShareWhatsAppSlip = () => {
+    if (!admittedRecord?.uhid) {
+      setNotice({ type: "warning", message: "Please complete the admission first before sharing the slip." });
+      return;
+    }
+    const rec = admittedRecord;
+    const parts = splitStoredPhone(rec.mobile);
+    const waNumber = toWhatsAppNumber(parts.countryCode, parts.value);
+
+    const lines = [
+      `*HospAI Hospital - Inpatient Admission & Bed Allocation Slip*`,
+      `----------------------------------------`,
+      `Patient: ${rec.patientName} (UHID: ${rec.uhid})`,
+      `Admission #: ${rec.admissionId || "ADM-ACTIVE"}`,
+      `Admission Date: ${rec.admissionDate || new Date().toLocaleString("en-IN")}`,
+      `Department: ${rec.department}`,
+      `Consultant Doctor: ${rec.doctor}`,
+      `Ward / Bed: ${rec.ward} · Bed ${rec.bedNo}`,
+      rec.roomNo && rec.roomNo !== "-" ? `Room No: ${rec.roomNo}` : "",
+      rec.triagePriority ? `Triage / Acuity: ${rec.triagePriority}` : "",
+      `Payer: ${rec.payer || "Self-pay"}${rec.policyNo ? ` (Policy ${rec.policyNo})` : ""}`,
+      `----------------------------------------`,
+      `Please report to the assigned ward nursing station with this confirmation slip.`,
+      `HospAI 24x7 Inpatient Care Team`,
+    ].filter(Boolean);
+
+    const text = lines.join("\n");
+    const url = waNumber
+      ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`
+      : `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+    setNotice({
+      type: "success",
+      message: waNumber ? `WhatsApp chat opened for ${parts.countryCode} ${parts.value}.` : "WhatsApp opened.",
+    });
+  };
+
+  return (
+    <div className="ip-admission-page" style={{ padding: "20px 28px 48px", background: "#f8fafc", minHeight: "100vh" }}>
+      {/* 1. TOP HEADER & BREADCRUMB - Matching DashboardPage */}
+      <div className="hosp-dashboard-top" style={{ marginBottom: "18px" }}>
+        <div>
+          <div className="hosp-dashboard-eyebrow">
+            <span>HospAI</span>
+            <span>/</span>
+            <span>IP Management</span>
+            <span>/</span>
+            <span style={{ color: "#0f172a", fontWeight: 700 }}>Inpatient Admission</span>
+          </div>
+          <h1 className="hosp-dashboard-page-title" style={{ fontSize: "28px", fontWeight: 800, margin: "2px 0 4px", color: "#0f172a" }}>
+            Inpatient Admission & Bed Allocation
+          </h1>
+          <p className="hosp-dashboard-page-subtitle" style={{ fontSize: "13.5px", color: "#64748b", margin: 0 }}>
+            Search an already-registered patient, record the doctor's admission order, and allocate a hospital bed.
+          </p>
+        </div>
+
+        <div className="hosp-dashboard-top-actions" style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          <Button
+            variant="ghost"
+            onClick={() => onNavigate && onNavigate("inpatient-patients")}
+            style={{ background: "#ffffff", border: "1px solid #cbd5e1", fontSize: "13px" }}
+          >
+            View Active Inpatients
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => onNavigate && onNavigate("bed-management")}
+            style={{ background: "#ffffff", border: "1.5px solid #00828a", color: "#00828a", fontWeight: 700, fontSize: "13px" }}
+          >
+            Open Bed Management
+          </Button>
+        </div>
+      </div>
+
+      {/* SEARCH & SELECT REGISTERED PATIENT */}
+      <div
+        style={{
+          background: selectedPatient?.uhid ? "#f0fdf4" : "#ffffff",
+          border: `1.5px solid ${selectedPatient?.uhid ? "#86efac" : "#e2e8f0"}`,
+          borderRadius: "14px",
+          padding: "20px 24px",
+          marginBottom: "22px",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
+        }}
+      >
+        <div style={{ marginBottom: "12px" }}>
+          <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#0f172a", margin: 0 }}>
+            1. Search Registered Patient
+          </h3>
+          <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0 0" }}>
+            Lookup by UHID, Name, or Mobile number. Patients are registered once at the Registration Desk -- this page only records the admission order and bed.
+          </p>
+        </div>
+
+        <PatientSearchPicker
+          onSelect={(pat) => {
+            const fullPatName = fullPatientName(pat);
+            void handleSelectPatient({
+              uhid: pat.patient_id,
+              patientName: fullPatName,
+              ageGender: `${pat.age ? pat.age + " yrs" : ""} / ${pat.gender || ""}`,
+              mobile: pat.phone ? formatPhone(pat.phone_country_code, pat.phone) : "",
+            });
+            setNotice({ type: "success", message: `Selected patient: ${fullPatName} (${pat.patient_id})` });
+          }}
+        />
+
+        {selectedPatient?.uhid && (
+          <div style={{ marginTop: "16px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <strong style={{ fontSize: "15px", color: "#0f172a" }}>{selectedPatient.patientName}</strong>
+              <div style={{ fontSize: "12.5px", color: "#64748b", marginTop: "3px" }}>
+                UHID: <span style={{ fontWeight: 700, color: "#2563eb" }}>{selectedPatient.uhid}</span> · {selectedPatient.ageGender} · Mobile: {selectedPatient.mobile}
+              </div>
+            </div>
+            <Button variant="ghost" onClick={handleClearForm} style={{ fontSize: "12px" }}>
+              Clear Selection
+            </Button>
+          </div>
+        )}
+
+        {selectedPatient?.uhid && registered && (registered.bloodGroup || registered.allergies || registered.address || registered.insurance || registered.symptoms || registered.vitals) && (
+          <div style={{ marginTop: "10px", background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "12px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "8px 18px", fontSize: "12.5px" }}>
+            {([
+              ["Blood group", registered.bloodGroup], ["Allergies", registered.allergies], ["Symptoms at registration", registered.symptoms],
+              ["Vitals at registration", registered.vitals], ["Insurance", registered.insurance], ["Address", registered.address],
+            ] as [string, string | undefined][]).filter(([, v]) => v).map(([label, v]) => (
+              <div key={label}>
+                <div style={{ fontSize: "10.5px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
+                <div style={{ color: "#0f172a", fontWeight: 600 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Doctor's Order context -- pulled from the IP appointment booked at
+            registration, so bed allocation follows what the doctor actually
+            ordered rather than an arbitrary re-pick. */}
+        {selectedPatient?.uhid && !loadingOrder && (
+          doctorOrder ? (
+            <div style={{ marginTop: "12px", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: "8px", padding: "10px 16px", fontSize: "13px", color: "#1e40af" }}>
+              <strong>Doctor Consultation Found:</strong> Previous booking with <strong>{doctorOrder.doctor}</strong> ({doctorOrder.department}){doctorOrder.date ? ` on ${new Date(doctorOrder.date).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}` : ""}. Department and Doctor have been pre-filled below and can be adjusted if needed.
+            </div>
+          ) : (
+            <div style={{ marginTop: "12px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", padding: "10px 16px", fontSize: "13px", color: "#166534" }}>
+              <strong>Direct Inpatient Admission:</strong> Patient verified (UHID: <strong>{selectedPatient.uhid}</strong>). Select the admitting department, consulting doctor, and bed below to complete admission.
+            </div>
+          )
+        )}
+      </div>
+
+      {/* ========================================================================= */}
+      {/* SECTION 2: CLINICAL INPATIENT ADMISSION & BED ALLOTMENT */}
+      {/* ========================================================================= */}
+      <div
+        style={{
+          background: "#ffffff",
+          border: "2px solid #2563eb",
+          borderRadius: "14px",
+          padding: "24px 28px",
+          marginBottom: "24px",
+          boxShadow: "0 2px 8px rgba(37,99,235,0.08)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <span style={{ width: "38px", height: "38px", borderRadius: "10px", background: "#eff6ff", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 4v16M2 8h18a2 2 0 0 1 2 2v10M2 17h20M6 8v9" />
+              </svg>
+            </span>
+            <div>
+              <h2 style={{ fontSize: "17px", fontWeight: 800, color: "#0f172a", margin: 0 }}>
+                2. Inpatient Clinical Admission & Hospital Bed Allotment
+              </h2>
+              <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0 0" }}>
+                Record the admitting consultant, clinical reason, triage priority, and assign a vacant hospital bed.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Row A: Department *, Consulting Doctor *, Admission Type, Acuity */}
+        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.2fr 1fr 1fr", gap: "18px", marginBottom: "18px" }}>
+          <div>
+            <Label>Admitting Department <span style={{ color: "#ef4444" }}>*</span></Label>
+            <select
+              value={department}
+              onChange={(e) => setDepartment(e.target.value)}
+              className="pharmacy-rx-search-input"
+              style={{ height: "42px", padding: "0 12px", borderRadius: "8px", border: "1px solid #cbd5e1", width: "100%", boxSizing: "border-box" }}
+            >
+              <option value="">
+                {directoryLoading ? "Loading departments..." : departmentOptions.length === 0 ? "No departments -- add them in Doctor Scheduling" : "Select department"}
+              </option>
+              {departmentOptions.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <Label>Consulting / Admitting Doctor <span style={{ color: "#ef4444" }}>*</span></Label>
+            <select
+              value={consultingDoctor}
+              onChange={(e) => setConsultingDoctor(e.target.value)}
+              disabled={!department}
+              className="pharmacy-rx-search-input"
+              style={{ height: "42px", padding: "0 12px", borderRadius: "8px", border: "1px solid #cbd5e1", width: "100%", boxSizing: "border-box" }}
+            >
+              <option value="">
+                {!department ? "Select department first" : filteredDoctors.length === 0 ? `No doctors scheduled in ${department}` : "Select doctor"}
+              </option>
+              {filteredDoctors.map((doc) => (
+                <option key={doc.doctor_name} value={doc.doctor_name}>
+                  {doc.doctor_name} ({doc.department})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+              <Label style={{ margin: 0 }}>Admission Type <span style={{ color: "#ef4444" }}>*</span></Label>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  type="button"
+                  onClick={() => setIsCustomTypeMode(!isCustomTypeMode)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#2563eb",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    padding: "0 2px",
+                  }}
+                  title={isCustomTypeMode ? "Switch to dropdown" : "Type custom admission type"}
+                >
+                  {isCustomTypeMode ? "📋 Dropdown" : "✏️ Custom"}
+                </button>
+                <span style={{ color: "#cbd5e1" }}>|</span>
+                <button
+                  type="button"
+                  onClick={() => setIsManageTypesOpen(true)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#0891b2",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    padding: "0 2px",
+                  }}
+                  title="Manage available admission types"
+                >
+                  ⚙️ Manage
+                </button>
+              </div>
+            </div>
+
+            {!isCustomTypeMode ? (
+              <select
+                value={admissionType}
+                onChange={(e) => {
+                  if (e.target.value === "__CUSTOM__") {
+                    setIsCustomTypeMode(true);
+                  } else if (e.target.value === "__MANAGE__") {
+                    setIsManageTypesOpen(true);
+                  } else {
+                    setAdmissionType(e.target.value);
+                  }
+                }}
+                className="pharmacy-rx-search-input"
+                style={{ height: "42px", padding: "0 12px", borderRadius: "8px", border: "1px solid #cbd5e1", width: "100%", boxSizing: "border-box" }}
+              >
+                <option value="">Select admission type</option>
+                {allAdmissionTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+                <option disabled>──────────</option>
+                <option value="__CUSTOM__">✏️ Type custom admission type...</option>
+                <option value="__MANAGE__">⚙️ Manage admission types...</option>
+              </select>
+            ) : (
+              <div style={{ display: "flex", gap: "6px" }}>
+                <Input
+                  type="text"
+                  value={admissionType}
+                  onChange={(e) => setAdmissionType(e.target.value)}
+                  placeholder="e.g. Maternity / Delivery..."
+                  autoFocus
+                  style={{ height: "42px", flex: 1 }}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const trimmed = admissionType.trim();
+                    if (trimmed && !allAdmissionTypes.includes(trimmed)) {
+                      saveCustomTypes([...customAdmissionTypes, trimmed]);
+                      setNotice({ type: "success", message: `Saved "${trimmed}" to admission types.` });
+                    }
+                    setIsCustomTypeMode(false);
+                  }}
+                  style={{ height: "42px", whiteSpace: "nowrap", padding: "0 10px", fontSize: "12px" }}
+                  title="Save to options and return to dropdown"
+                >
+                  Done
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <Label>Clinical Acuity / Triage</Label>
+            <select
+              value={triagePriority}
+              onChange={(e) => setTriagePriority(e.target.value as any)}
+              className="pharmacy-rx-search-input"
+              style={{ height: "42px", padding: "0 12px", borderRadius: "8px", border: "1px solid #cbd5e1", width: "100%", boxSizing: "border-box" }}
+            >
+              <option value="">Select acuity</option>
+              <option value="Critical">🔴 Critical (ICU Priority)</option>
+              <option value="Urgent">🟡 Urgent (High Dependency)</option>
+              <option value="Stable">🟢 Stable (Standard Ward)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Row B: Clinical Reason / Diagnosis *, Expected Stay */}
+        <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "18px", marginBottom: "18px" }}>
+          <div>
+            <Label>Clinical Reason for Admission / Provisional Diagnosis <span style={{ color: "#ef4444" }}>*</span></Label>
+            <Input
+              type="text"
+              value={reasonForAdmission}
+              onChange={(e) => setReasonForAdmission(e.target.value)}
+              placeholder="e.g. Acute exacerbation of COPD, Post-op monitoring, High grade fever investigation"
+              style={{ height: "42px" }}
+            />
+          </div>
+
+          <div>
+            <Label>Expected Stay (Days)</Label>
+            <Input
+              type="number"
+              min={1}
+              max={60}
+              value={expectedStay}
+              onChange={(e) => setExpectedStay(e.target.value)}
+              placeholder="e.g. 3"
+              style={{ height: "42px" }}
+            />
+          </div>
+        </div>
+
+        {/* Clinical Notes / Pre-Op Instructions */}
+        <div style={{ marginBottom: "22px" }}>
+          <Label>Admission Directives / Pre-Op Instructions (optional)</Label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            placeholder="Special instructions for nursing staff, dietary restrictions, baseline medications..."
+            className="pharmacy-rx-search-input"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: "8px", border: "1px solid #cbd5e1", boxSizing: "border-box", fontSize: "13px" }}
+          />
+        </div>
+
+        {/* PAYER: Self-pay or Insurance */}
+        <div style={{ borderTop: "1.5px solid #e2e8f0", paddingTop: "20px", marginBottom: "22px" }}>
+          <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#0f172a", margin: "0 0 2px" }}>Payer for this Admission</h3>
+          <p style={{ fontSize: "12px", color: "#64748b", margin: "0 0 12px" }}>
+            Choose who pays for this stay. Insurance on the patient's record is filled in automatically; it can be changed later at IP Discharge Billing.
+          </p>
+          <AdmissionPayerFields value={payer} onChange={setPayer} />
+        </div>
+
+        {/* SECTION 6: HOSPITAL BED ALLOCATION */}
+        <div style={{ borderTop: "1.5px solid #e2e8f0", paddingTop: "20px", marginTop: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "10px" }}>
+            <div>
+              <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#0f172a", margin: 0 }}>
+                Select Available Hospital Bed
+              </h3>
+              <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0 0" }}>
+                Select from configured ICU (5 Beds), General Ward (5 Beds), and Single Room (5 Rooms) units.
+              </p>
+            </div>
+
+            {/* Ward Filter Buttons */}
+            <div style={{ display: "flex", gap: "6px" }}>
+              {["All Wards", "ICU", "General", "Single"].map((wf) => (
+                <button
+                  key={wf}
+                  type="button"
+                  onClick={() => setWardFilter(wf)}
+                  style={{
+                    padding: "5px 12px",
+                    borderRadius: "6px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    border: "1px solid #cbd5e1",
+                    background: wardFilter === wf ? "#2563eb" : "#ffffff",
+                    color: wardFilter === wf ? "#ffffff" : "#475569",
+                    cursor: "pointer",
+                  }}
+                >
+                  {wf}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {loadingBeds ? (
+            <div style={{ padding: "20px", textAlign: "center", color: "#64748b", fontSize: "13px" }}>
+              Loading vacant hospital beds...
+            </div>
+          ) : displayBeds.length === 0 ? (
+            <div style={{ padding: "20px", textAlign: "center", background: "#fff7ed", border: "1px solid #ffedd5", borderRadius: "8px", color: "#c2410c", fontSize: "13px" }}>
+              No available beds matching "{wardFilter}". Please add or clear beds from Bed Management.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: "12px", marginBottom: "18px" }}>
+              {displayBeds.map((bed) => {
+                const isSelected = selectedBedNo === bed.bed_no;
+                const isIcu = bed.ward.toLowerCase().includes("icu");
+                const isSingle = bed.ward.toLowerCase().includes("single");
+                const badgeColor = isIcu ? "#dc2626" : isSingle ? "#7c3aed" : "#d97706";
+                const badgeBg = isIcu ? "#fee2e2" : isSingle ? "#f3e8ff" : "#fef3c7";
+
+                return (
+                  <div
+                    key={bed.bed_no}
+                    onClick={() => setSelectedBedNo(isSelected ? "" : bed.bed_no)}
+                    style={{
+                      border: isSelected ? "2.5px solid #2563eb" : "1.5px solid #e2e8f0",
+                      background: isSelected ? "#eff6ff" : "#ffffff",
+                      borderRadius: "10px",
+                      padding: "12px 14px",
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                      boxShadow: isSelected ? "0 4px 12px rgba(37,99,235,0.15)" : "0 1px 3px rgba(0,0,0,0.02)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                      <span
+                        style={{
+                          fontSize: "10.5px",
+                          fontWeight: 800,
+                          padding: "2px 8px",
+                          borderRadius: "6px",
+                          background: badgeBg,
+                          color: badgeColor,
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        {bed.ward}
+                      </span>
+                      {isSelected && (
+                        <span style={{ background: "#2563eb", color: "#ffffff", width: "18px", height: "18px", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 800 }}>
+                          ✓
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: "15px", fontWeight: 800, color: "#0f172a" }}>
+                      Bed {bed.bed_no}
+                    </div>
+                    <div style={{ fontSize: "11.5px", color: "#64748b", marginTop: "2px" }}>
+                      Room {bed.room_no} · ₹{bed.daily_rate.toLocaleString("en-IN")}/day
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#16a34a", fontWeight: 600, marginTop: "6px", display: "flex", alignItems: "center", gap: "4px" }}>
+                      <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#16a34a" }} />
+                      Available & Ready
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {chosenBed && (
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "13px", color: "#166534" }}>
+              <span>
+                Selected Bed: <strong>{chosenBed.bed_no}</strong> ({chosenBed.ward} - Room {chosenBed.room_no}) · Daily Rate: <strong>₹{chosenBed.daily_rate.toLocaleString("en-IN")}/day</strong>
+              </span>
+              <Button variant="ghost" onClick={() => setSelectedBedNo("")} style={{ height: "28px", fontSize: "12px", color: "#166534" }}>
+                Clear Bed
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* ACTIONS FOOTER */}
+        <div style={{ marginTop: "26px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", borderTop: "1px solid #e2e8f0", paddingTop: "20px" }}>
+          <div style={{ display: "flex", gap: "10px" }}>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={submitting}
+              onClick={() => void handleCompleteAdmission()}
+              style={{
+                background: "#2563eb",
+                borderColor: "#2563eb",
+                padding: "12px 28px",
+                fontSize: "14px",
+                fontWeight: 800,
+                boxShadow: "0 2px 6px rgba(37,99,235,0.25)",
+              }}
+            >
+              {submitting ? "Processing IP Admission…" : "Complete Admission & Allocate Bed ➔"}
+            </Button>
+
+            <button
+              type="button"
+              className="btn-clear-outlined"
+              onClick={handlePrintSlip}
+              style={{ padding: "10px 20px", fontSize: "13px", fontWeight: 700, borderRadius: "8px" }}
+            >
+              Print Admission Slip
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShareWhatsAppSlip}
+              style={{
+                padding: "10px 18px",
+                fontSize: "13px",
+                fontWeight: 700,
+                borderRadius: "8px",
+                background: "#25D366",
+                color: "#ffffff",
+                border: "none",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+              }}
+            >
+              💬 Share via WhatsApp
+            </button>
+          </div>
+
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={handleClearForm}
+            style={{ fontSize: "13px", color: "#64748b" }}
+          >
+            Clear Form
+          </Button>
+        </div>
+      </div>
+
+      {/* Success confirmation -- the working form is already cleared for the
+          next patient by this point, so dismissing this just closes it. */}
+      {admittedRecord?.uhid && (
+        <Modal
+          open={!!admittedRecord?.uhid}
+          onClose={() => setAdmittedRecord(null)}
+          title="Inpatient Admission Confirmed"
+        >
+          <div style={{ padding: "0.5rem 0", maxWidth: "480px" }}>
+            <div style={{ textAlign: "center", marginBottom: "1rem" }}>
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "52px",
+                  height: "52px",
+                  borderRadius: "50%",
+                  background: "#dcfce7",
+                  color: "#16a34a",
+                  fontSize: "26px",
+                  marginBottom: "8px",
+                }}
+              >
+                ✓
+              </div>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "#64748b" }}>
+                Bed allocated and admission order recorded on the patient's account.
+              </p>
+            </div>
+
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "1rem", marginBottom: "1.25rem", fontSize: "0.85rem" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                <div>Patient: <strong>{admittedRecord.patientName}</strong></div>
+                <div>UHID: <strong>{admittedRecord.uhid}</strong></div>
+                <div>Admission #: <strong>{admittedRecord.admissionId}</strong></div>
+                <div>Ward / Bed: <strong>{admittedRecord.ward} · {admittedRecord.bedNo}</strong></div>
+                <div>Department: <strong>{admittedRecord.department}</strong></div>
+                <div>Doctor: <strong>{admittedRecord.doctor}</strong></div>
+                <div>Admission Type: <strong>{admittedRecord.admissionType || "Planned / Elective"}</strong></div>
+                <div>Payer: <strong>{admittedRecord.payer || "Self-pay"}{admittedRecord.policyNo ? ` (Policy ${admittedRecord.policyNo})` : ""}</strong></div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end" }}>
+              <Button type="button" variant="secondary" onClick={handlePrintSlip}>
+                🖨️ Print Admission Slip
+              </Button>
+              <Button
+                type="button"
+                style={{ background: "#25D366", borderColor: "#25D366", color: "#ffffff", fontWeight: 700 }}
+                onClick={handleShareWhatsAppSlip}
+              >
+                💬 WhatsApp Slip
+              </Button>
+              <Button
+                type="button"
+                className="primary"
+                style={{ background: "#2563eb", borderColor: "#2563eb", fontWeight: 700 }}
+                onClick={() => setAdmittedRecord(null)}
+              >
+                Admit Next Patient ➔
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Manage Admission Types Modal */}
+      <Modal
+        open={isManageTypesOpen}
+        onClose={() => setIsManageTypesOpen(false)}
+        title="Manage Inpatient Admission Types"
+      >
+        <div style={{ padding: "0.25rem 0", maxWidth: "480px" }}>
+          <p style={{ fontSize: "13px", color: "#64748b", margin: "0 0 14px" }}>
+            Add, select, or remove custom admission types. These options appear in the Admission Type selector.
+          </p>
+
+          <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+            <Input
+              placeholder="New admission type (e.g. Maternity / Delivery)"
+              value={newTypeInput}
+              onChange={(e) => setNewTypeInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const val = newTypeInput.trim();
+                  if (val) {
+                    if (allAdmissionTypes.includes(val)) {
+                      setNotice({ type: "warning", message: `"${val}" already exists.` });
+                    } else {
+                      saveCustomTypes([...customAdmissionTypes, val]);
+                      setAdmissionType(val);
+                      setNewTypeInput("");
+                      setNotice({ type: "success", message: `Added "${val}".` });
+                    }
+                  }
+                }
+              }}
+              style={{ flex: 1 }}
+            />
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => {
+                const val = newTypeInput.trim();
+                if (val) {
+                  if (allAdmissionTypes.includes(val)) {
+                    setNotice({ type: "warning", message: `"${val}" already exists.` });
+                  } else {
+                    saveCustomTypes([...customAdmissionTypes, val]);
+                    setAdmissionType(val);
+                    setNewTypeInput("");
+                    setNotice({ type: "success", message: `Added "${val}".` });
+                  }
+                }
+              }}
+            >
+              + Add
+            </Button>
+          </div>
+
+          <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "4px" }}>
+            {allAdmissionTypes.map((t) => {
+              const isCustom = customAdmissionTypes.includes(t);
+              const isSelected = admissionType === t;
+              return (
+                <div
+                  key={t}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    background: isSelected ? "#eff6ff" : "transparent",
+                    borderBottom: "1px solid #f1f5f9",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span style={{ fontWeight: isSelected ? 700 : 500, color: isSelected ? "#1d4ed8" : "#0f172a", fontSize: "13.5px" }}>
+                      {t}
+                    </span>
+                    {!isCustom && <span style={{ fontSize: "10px", background: "#f1f5f9", color: "#64748b", padding: "1px 6px", borderRadius: "4px" }}>Standard</span>}
+                    {isCustom && <span style={{ fontSize: "10px", background: "#e0f2fe", color: "#0369a1", padding: "1px 6px", borderRadius: "4px" }}>Custom</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <Button
+                      type="button"
+                      variant={isSelected ? "primary" : "secondary"}
+                      size="sm"
+                      onClick={() => {
+                        setAdmissionType(t);
+                        setIsCustomTypeMode(false);
+                        setIsManageTypesOpen(false);
+                      }}
+                      style={{ fontSize: "11px", padding: "2px 8px" }}
+                    >
+                      {isSelected ? "Selected" : "Select"}
+                    </Button>
+                    {isCustom && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = customAdmissionTypes.filter((x) => x !== t);
+                          saveCustomTypes(next);
+                          if (admissionType === t) {
+                            setAdmissionType("");
+                          }
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "#ef4444",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          padding: "2px 6px",
+                        }}
+                        title="Delete this custom type"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: "16px" }}>
+            {customAdmissionTypes.length > 0 ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  saveCustomTypes([]);
+                  setAdmissionType("");
+                  setNotice({ type: "info", message: "Reset to default types." });
+                }}
+                style={{ color: "#64748b" }}
+              >
+                Reset to default types
+              </Button>
+            ) : <div />}
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setIsManageTypesOpen(false)}
+            >
+              Done
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
