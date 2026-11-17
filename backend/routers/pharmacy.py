@@ -9,6 +9,7 @@ from common import rows_to_dicts, validate_required_fields, log_audit_event, cli
 import legacy_queries as lq
 import grn_import
 import pharmacy_profit
+import pharmacy_settings
 
 router = APIRouter(prefix="/api/pharmacy", tags=["pharmacy"])
 
@@ -252,6 +253,23 @@ def pharmacy_dispense(request: Request, payload: dict = Body(...), db: Session =
     log_audit_event(db, user, client_ip(request), "create", "pharmacy_sales", ",".join(str(i) for i in result["sale_ids"]),
                      {"total_amount": result["total_amount"], "stock_source": result["stock_source"]})
     return result
+
+
+@router.get("/settings")
+def pharmacy_settings_get(db: Session = Depends(get_db), user: dict = Depends(require_permissions("pharmacy.read"))):
+    """Dosage forms & categories and store / rack locations (Pharmacy > Settings)."""
+    return pharmacy_settings.get_settings(db)
+
+
+@router.put("/settings")
+def pharmacy_settings_update(request: Request, payload: dict = Body(...), db: Session = Depends(get_db),
+                             user: dict = Depends(require_permissions("pharmacy.write"))):
+    try:
+        settings = pharmacy_settings.update_settings(db, payload, user.get("username"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    log_audit_event(db, user, client_ip(request), "update", "pharmacy_settings", ",".join(sorted(payload.keys())), payload)
+    return settings
 
 
 @router.get("/returns")

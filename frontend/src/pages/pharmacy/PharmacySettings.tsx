@@ -24,6 +24,9 @@ type Medicine = {
   active?: boolean;
 };
 
+type StoreLocation = { name: string; code: string; desc: string };
+const EMPTY_LOCATION: StoreLocation = { name: "", code: "", desc: "" };
+
 export default function PharmacySettings({ setNotice, onNavigate }: Props) {
   const [activeTab, setActiveTab] = useState<"medicines" | "categories" | "stores" | "print">("medicines");
   const [medicines, setMedicines] = useState<Medicine[]>([]);
@@ -68,7 +71,99 @@ export default function PharmacySettings({ setNotice, onNavigate }: Props) {
 
   useEffect(() => {
     void loadMedicines();
+    void loadSettings();
   }, []);
+
+  // Dosage forms & categories and store / rack locations: kept on the server, shared by every desk.
+  const [dosageForms, setDosageForms] = useState<string[]>([]);
+  const [storeLocations, setStoreLocations] = useState<StoreLocation[]>([]);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [newForm, setNewForm] = useState("");
+  const [editingFormIdx, setEditingFormIdx] = useState<number | null>(null);
+  const [editingFormText, setEditingFormText] = useState("");
+  const [locationDraft, setLocationDraft] = useState<StoreLocation>(EMPTY_LOCATION);
+  const [editingLocIdx, setEditingLocIdx] = useState<number | null>(null);
+
+  const loadSettings = async () => {
+    try {
+      const res = await apiFetch<{ dosage_forms: string[]; store_locations: StoreLocation[] }>("/api/pharmacy/settings");
+      setDosageForms(res?.dosage_forms || []);
+      setStoreLocations(res?.store_locations || []);
+    } catch (err) {
+      reportError(setNotice, err as any, "Failed to load pharmacy settings");
+    }
+  };
+
+  const saveSettings = async (patch: { dosage_forms?: string[]; store_locations?: StoreLocation[] }, message: string) => {
+    setSavingSettings(true);
+    try {
+      const res = await apiFetch<{ dosage_forms: string[]; store_locations: StoreLocation[] }>("/api/pharmacy/settings", {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+      setDosageForms(res.dosage_forms || []);
+      setStoreLocations(res.store_locations || []);
+      setNotice({ type: "success", message });
+      return true;
+    } catch (err) {
+      reportError(setNotice, err as any, "Failed to save pharmacy settings");
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const addDosageForm = async () => {
+    const name = newForm.trim().replace(/\s+/g, " ");
+    if (!name) return;
+    if (dosageForms.some((f) => f.toLowerCase() === name.toLowerCase())) {
+      setNotice({ type: "warning", message: `"${name}" is already in the list.` });
+      return;
+    }
+    if (await saveSettings({ dosage_forms: [...dosageForms, name] }, `Added "${name}".`)) setNewForm("");
+  };
+
+  const renameDosageForm = async (idx: number) => {
+    const name = editingFormText.trim().replace(/\s+/g, " ");
+    if (!name) return;
+    if (dosageForms.some((f, i) => i !== idx && f.toLowerCase() === name.toLowerCase())) {
+      setNotice({ type: "warning", message: `"${name}" is already in the list.` });
+      return;
+    }
+    const next = dosageForms.map((f, i) => (i === idx ? name : f));
+    if (await saveSettings({ dosage_forms: next }, `Renamed to "${name}".`)) setEditingFormIdx(null);
+  };
+
+  const removeDosageForm = (idx: number) =>
+    void saveSettings({ dosage_forms: dosageForms.filter((_, i) => i !== idx) }, `Removed "${dosageForms[idx]}".`);
+
+  const saveLocation = async () => {
+    const draft = {
+      name: locationDraft.name.trim(),
+      code: locationDraft.code.trim().toUpperCase().replace(/\s+/g, "-"),
+      desc: locationDraft.desc.trim(),
+    };
+    if (!draft.name || !draft.code) {
+      setNotice({ type: "warning", message: "Location name and code are required." });
+      return;
+    }
+    if (storeLocations.some((l, i) => i !== editingLocIdx && l.code === draft.code)) {
+      setNotice({ type: "warning", message: `Code ${draft.code} is already used by another location.` });
+      return;
+    }
+    const next = editingLocIdx === null
+      ? [...storeLocations, draft]
+      : storeLocations.map((l, i) => (i === editingLocIdx ? draft : l));
+    if (await saveSettings({ store_locations: next }, editingLocIdx === null ? `Added location ${draft.name}.` : `Updated ${draft.name}.`)) {
+      setLocationDraft(EMPTY_LOCATION);
+      setEditingLocIdx(null);
+    }
+  };
+
+  const removeLocation = (idx: number) => {
+    void saveSettings({ store_locations: storeLocations.filter((_, i) => i !== idx) }, `Removed ${storeLocations[idx].name}.`);
+    if (editingLocIdx === idx) { setEditingLocIdx(null); setLocationDraft(EMPTY_LOCATION); }
+  };
 
   // Filtered
   const filteredMeds = useMemo(() => {
@@ -282,12 +377,53 @@ export default function PharmacySettings({ setNotice, onNavigate }: Props) {
           <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.1rem", fontWeight: 700, color: "#0f172a" }}>
             Configured Dosage Forms & Therapeutic Categories
           </h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem" }}>
-            {["Tablets & Capsules", "Syrups & Oral Suspensions", "Injections & IV Fluids", "Topical Creams & Ointments", "Eye / Ear Drops", "Inhalers & Sprays"].map((cat) => (
-              <div key={cat} style={{ background: "#f8fafc", padding: "1rem", borderRadius: "8px", border: "1px solid #e2e8f0", fontWeight: 600, color: "#334155" }}>
-                ✓ {cat}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "1rem", maxWidth: "560px" }}>
+            <Input
+              value={newForm}
+              onChange={(e) => setNewForm(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addDosageForm(); } }}
+              placeholder="New dosage form / category (e.g. Suppositories)"
+              maxLength={80}
+              style={{ flex: 1 }}
+            />
+            <Button type="button" variant="primary" onClick={() => void addDosageForm()} disabled={savingSettings || !newForm.trim()}>
+              + Add
+            </Button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" }}>
+            {dosageForms.map((cat, idx) => (
+              <div key={`${cat}-${idx}`} style={{ background: "#f8fafc", padding: "0.85rem 1rem", borderRadius: "8px", border: "1px solid #e2e8f0", fontWeight: 600, color: "#334155" }}>
+                {editingFormIdx === idx ? (
+                  <div style={{ display: "flex", gap: "6px" }}>
+                    <Input
+                      autoFocus
+                      value={editingFormText}
+                      maxLength={80}
+                      onChange={(e) => setEditingFormText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); void renameDosageForm(idx); }
+                        if (e.key === "Escape") setEditingFormIdx(null);
+                      }}
+                      style={{ flex: 1, height: "32px" }}
+                    />
+                    <Button type="button" variant="primary" style={{ padding: "2px 10px" }} onClick={() => void renameDosageForm(idx)} disabled={savingSettings}>Save</Button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px" }}>
+                    <span>✓ {cat}</span>
+                    <span style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
+                      <button type="button" title="Rename" onClick={() => { setEditingFormIdx(idx); setEditingFormText(cat); }}
+                        style={{ background: "none", border: "none", color: "#00828a", cursor: "pointer", fontSize: "12px", fontWeight: 700 }}>Edit</button>
+                      <button type="button" title="Remove" onClick={() => removeDosageForm(idx)} disabled={savingSettings}
+                        style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: "13px", fontWeight: 700 }}>✕</button>
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
+            {dosageForms.length === 0 && (
+              <div style={{ color: "#64748b", fontSize: "13px" }}>No dosage forms configured. Add one above.</div>
+            )}
           </div>
         </div>
       )}
@@ -298,19 +434,42 @@ export default function PharmacySettings({ setNotice, onNavigate }: Props) {
           <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.1rem", fontWeight: 700, color: "#0f172a" }}>
             Physical Store & Rack Locations
           </h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 2fr auto", gap: "8px", alignItems: "center", marginBottom: "1rem", background: editingLocIdx !== null ? "#f0fdfa" : "transparent", padding: editingLocIdx !== null ? "8px" : 0, borderRadius: "8px" }}>
+            <Input value={locationDraft.name} maxLength={80} placeholder="Location name (e.g. OT Pharmacy)"
+              onChange={(e) => setLocationDraft((p) => ({ ...p, name: e.target.value }))} />
+            <Input value={locationDraft.code} maxLength={40} placeholder="Code (e.g. RACK-OT)"
+              onChange={(e) => setLocationDraft((p) => ({ ...p, code: e.target.value.toUpperCase() }))} />
+            <Input value={locationDraft.desc} maxLength={200} placeholder="Description (optional)"
+              onChange={(e) => setLocationDraft((p) => ({ ...p, desc: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveLocation(); } }} />
+            <div style={{ display: "flex", gap: "6px" }}>
+              <Button type="button" variant="primary" onClick={() => void saveLocation()} disabled={savingSettings}>
+                {editingLocIdx === null ? "+ Add" : "Save"}
+              </Button>
+              {editingLocIdx !== null && (
+                <Button type="button" variant="secondary" onClick={() => { setEditingLocIdx(null); setLocationDraft(EMPTY_LOCATION); }}>Cancel</Button>
+              )}
+            </div>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" }}>
-            {[
-              { name: "Main Central Pharmacy", code: "PHARM-MAIN", desc: "Ground floor outpatient & central dispensing" },
-              { name: "Emergency Fast-Rack", code: "RACK-EMERGENCY", desc: "Crash cart & acute emergency drugs" },
-              { name: "Cold Chain Storage (2°C - 8°C)", code: "COLD-STORAGE", desc: "Insulins, vaccines, and sera" },
-              { name: "IPD Floor 2 Storage Cabinet", code: "CAB-IPD-2", desc: "Inpatient routine ward stock" },
-            ].map((loc) => (
-              <div key={loc.code} style={{ background: "#f8fafc", padding: "1rem", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                <div style={{ fontWeight: 700, color: "#0f172a" }}>{loc.name}</div>
+            {storeLocations.map((loc, idx) => (
+              <div key={loc.code} style={{ background: editingLocIdx === idx ? "#f0fdfa" : "#f8fafc", padding: "1rem", borderRadius: "8px", border: `1px solid ${editingLocIdx === idx ? "#99f6e4" : "#e2e8f0"}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                  <div style={{ fontWeight: 700, color: "#0f172a" }}>{loc.name}</div>
+                  <span style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
+                    <button type="button" title="Edit" onClick={() => { setEditingLocIdx(idx); setLocationDraft(loc); }}
+                      style={{ background: "none", border: "none", color: "#00828a", cursor: "pointer", fontSize: "12px", fontWeight: 700 }}>Edit</button>
+                    <button type="button" title="Remove" onClick={() => removeLocation(idx)} disabled={savingSettings}
+                      style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: "13px", fontWeight: 700 }}>✕</button>
+                  </span>
+                </div>
                 <div style={{ fontSize: "0.75rem", color: "#00828a", fontWeight: 600, marginTop: "2px" }}>{loc.code}</div>
-                <div style={{ fontSize: "0.8rem", color: "#64748b", marginTop: "6px" }}>{loc.desc}</div>
+                {loc.desc && <div style={{ fontSize: "0.8rem", color: "#64748b", marginTop: "6px" }}>{loc.desc}</div>}
               </div>
             ))}
+            {storeLocations.length === 0 && (
+              <div style={{ color: "#64748b", fontSize: "13px" }}>No store locations configured. Add one above.</div>
+            )}
           </div>
         </div>
       )}
