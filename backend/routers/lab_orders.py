@@ -216,8 +216,34 @@ def diag_results_import(item_id: int, request: Request, file: UploadFile = File(
             file.filename, content, item.get("parameters") or [], item.get("service_name") or "", patient_name, specimen_nos)
     except file_import.FileImportError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    # Parameters printed on the report but missing from this test's catalogue are created now, so they
+    # render in the result workspace like any other parameter. Not once the report is past editing.
+    pending = result.get("new_parameters") or []
+    locked = bool(item.get("report_status")) and item["report_status"] not in lq.REPORT_EDITABLE_STATUSES
+    if pending and locked:
+        result.pop("new_parameters", None)
+        result["unmatched"] = (result.get("unmatched") or []) + [
+            {"name": c["name"], "value": str(c["value"]), "reason": "report is no longer editable"} for c in pending]
+        result.setdefault("warnings", []).append(
+            f"{len(pending)} parameter(s) not in the catalogue were not added because the report is already {item['report_status'].replace('_', ' ')}.")
+        pending = []
+    if pending:
+        def reuse(name, rows):
+            m = lab_result_import.ParameterMatcher(rows).match(name)[0]
+            return m or next((r for r in rows if r["name"].strip().lower() == name.lower()), None)
+
+        rows, _ = lq.ensure_diag_service_parameters(db, item["service_id"], pending, user.get("username"), match_existing=reuse)
+        lab_result_import.apply_new_parameters(result, rows)
+        if result["created_parameters"]:
+            result.setdefault("warnings", []).append(
+                f"{len(result['created_parameters'])} new parameter(s) were added to the {item.get('service_name') or 'test'} catalogue: "
+                + ", ".join(p["name"] for p in result["created_parameters"]) + ". Review their units and reference ranges.")
+    else:
+        result.pop("new_parameters", None)
+        result["created_parameters"] = []
     log_audit_event(db, user, client_ip(request), "results_import", "diag_results", str(item_id), {
         "file_name": file.filename, "file_type": result["file_type"], "processing": result["processing"],
+        "created_parameters": [p["name"] for p in result["created_parameters"]],
         "values_read": len(result["values"]), "skipped": len(result["skipped"]),
         "unmatched": len(result.get("unmatched") or []), "identity_warnings": result["identity_warnings"],
     })

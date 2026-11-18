@@ -353,12 +353,13 @@ def extract_supplier_invoice_from_text(text):
 LAB_RESULTS_PROMPT = """You are reading a laboratory result printout (analyzer print, lab report or handwritten result sheet).
 
 The test being reported is: {service_name}
-These are the ONLY parameters to fill, with their id, expected unit and type:
+These are the ONLY parameters that go in "results", with their id, expected unit and type:
 {parameters}
 
 Return ONLY a JSON object with exactly these keys:
 {{
   "results": [{{"parameter_id": 0, "value": ""}}],
+  "additional_results": [{{"name": "", "value": "", "unit": "", "ref_range": ""}}],
   "equipment": "",
   "patient_name": "",
   "sample_id": ""
@@ -367,6 +368,7 @@ Return ONLY a JSON object with exactly these keys:
 Rules:
 - One entry per parameter that has a result printed in the image. Skip parameters that are not present. Never invent values.
 - Match parameters by meaning, including common abbreviations (e.g. Hb = Haemoglobin, TLC/WBC = Total Leucocyte Count, PLT = Platelet Count, SGPT = ALT, SGOT = AST, FBS = Fasting Blood Sugar).
+- additional_results: every OTHER test result printed on the report that does not correspond to any parameter listed above (same meaning counts as a match, so do not repeat listed parameters here). Give its name exactly as printed, the value as printed, the printed unit and the printed reference range, each "" if not shown. Only real measured results: no patient details, dates, section headings, doctor names or remarks. [] if there are none.
 - numeric parameters: the number only, no units, flags or symbols (e.g. "13.4", not "13.4 g/dL H"). If the printed unit differs from the expected unit, still copy the printed number as is.
 - text / qualitative parameters: the result word or phrase as printed (e.g. "Positive", "Non-reactive", "Pale yellow").
 - equipment: analyzer / instrument name if printed, else "".
@@ -410,7 +412,8 @@ def _lab_prompt(parameters, service_name):
         f'- id {p["id"]}: {p["name"]} ({p.get("data_type") or "numeric"}{", " + p["unit"] if p.get("unit") else ""})'
         for p in parameters
     )
-    return LAB_RESULTS_PROMPT.format(service_name=service_name or "Laboratory test", parameters=param_lines)
+    return LAB_RESULTS_PROMPT.format(service_name=service_name or "Laboratory test",
+                                     parameters=param_lines or "(none configured yet: put every result in additional_results)")
 
 
 def extract_lab_results(file_bytes, parameters, service_name=""):
@@ -464,9 +467,15 @@ def map_lab_results(parsed, parameters):
             if value is None:
                 continue
         values[pid] = value
+    extras = []
+    for r in parsed.get("additional_results") if isinstance(parsed.get("additional_results"), list) else []:
+        if isinstance(r, dict) and _s(r.get("name")) and _s(r.get("value")):
+            extras.append({"name": _s(r.get("name")), "value": _s(r.get("value")),
+                           "unit": _s(r.get("unit")), "ref_range": _s(r.get("ref_range"))})
     return {
         "values": [{"parameter_id": pid, "value": v} for pid, v in values.items()],
         "skipped": skipped,
+        "additional": extras,
         "equipment": _s(parsed.get("equipment")),
         "patient_name": _s(parsed.get("patient_name")),
         "sample_id": _s(parsed.get("sample_id")),

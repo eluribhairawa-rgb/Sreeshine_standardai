@@ -21,7 +21,7 @@ type WorklistRow = {
   routing?: "in_house" | "outsourced" | "pending_vendor" | null;
 };
 
-type ParamDef = { id: number; name: string; data_type: string; unit?: string; method?: string; ref_low?: number; ref_high?: number; ref_text?: string; critical_low?: number; critical_high?: number };
+type ParamDef = { id: number; name: string; data_type: string; unit?: string; method?: string; ref_low?: number; ref_high?: number; ref_text?: string; critical_low?: number; critical_high?: number; auto_created?: boolean };
 type ResultRow = { id: number; parameter_id: number; parameter_name: string; value_text?: string; value_numeric?: number; unit?: string; ref_range_text?: string; ref_low?: number; ref_high?: number; flag?: string; is_draft: boolean; equipment_id?: number; reagent_lot_id?: number };
 type Specimen = { id: number; specimen_no: string; status: string; container_type?: string; collection_location?: string; collected_at?: string; received_at?: string; rejection_reason?: string };
 type ItemDetail = {
@@ -46,6 +46,7 @@ type ResultImport = {
   unmatched?: { name: string; value: string; reason: string }[]; equipment: string; identity_warnings?: string[];
   detected_fields: string[]; field_mapping?: Record<string, string | null>; preview: Record<string, string>[]; row_count: number;
   warnings?: string[];
+  created_parameters?: { id: number; name: string; data_type: string; unit?: string; ref_text?: string }[];
 };
 
 const RESULT_IMPORT_ACCEPT = ".csv,text/csv,.pdf,application/pdf,image/*";
@@ -280,7 +281,8 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
       return;
     }
     if (!isDraft) {
-      const missing = detail.parameters.filter((p) => !(resultValues[p.id] || "").trim());
+      // Parameters added automatically from an uploaded report are optional: other orders of this test never had them.
+      const missing = detail.parameters.filter((p) => !p.auto_created && !(resultValues[p.id] || "").trim());
       if (missing.length) {
         setNotice({ type: "warning", message: `Enter a value for every parameter before finalizing. Missing: ${missing.map((p) => p.name).join(", ")}.` });
         return;
@@ -357,6 +359,14 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
       }
       const result = data as ResultImport;
       setLastImport(result);
+      // Parameters printed on the report but missing from the catalogue were just created on the server:
+      // reload the item so they render as rows in the entry table (values typed so far are kept).
+      let paramCount = detail.parameters.length;
+      if (result.created_parameters?.length) {
+        const fresh = await apiFetch<ItemDetail>(`/api/diag/lab/items/${detail.id}`);
+        setDetail(fresh);
+        paramCount = fresh.parameters.length;
+      }
       const { values, equipment, identity_warnings, skipped } = result;
       const filled = resultsLocked ? [] : values;
       if (filled.length) {
@@ -380,9 +390,10 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
       const skippedNote = skipped?.length ? ` Enter manually: ${skipped.map((s) => `${s.parameter_name} (printed "${s.value}")`).join(", ")}.` : "";
       const warningNote = result.warnings?.length ? ` ${result.warnings.join(" ")}` : "";
       const source = result.file_type === "csv" ? "CSV" : "OCR";
+      const newNote = result.created_parameters?.length ? ` ${result.created_parameters.length} new parameter(s) added to the catalogue (marked NEW): ${result.created_parameters.map((p) => p.name).join(", ")}.` : "";
       setNotice(
         filled.length
-          ? { type: identityNote || skippedNote || warningNote ? "warning" : "success", message: `${source} filled ${filled.length} of ${detail.parameters.length} parameter(s).${equipmentNote} Verify the highlighted values before saving.${skippedNote}${warningNote}${identityNote}` }
+          ? { type: identityNote || skippedNote || warningNote ? "warning" : "success", message: `${source} filled ${filled.length} of ${paramCount} parameter(s).${newNote}${equipmentNote} Verify the highlighted values before saving.${skippedNote}${warningNote}${identityNote}` }
           : { type: "warning", message: `No values for this test's parameters could be filled from the file.${skippedNote}${warningNote || (result.file_type === "csv" ? "" : " Try a clearer photo.")}${identityNote}` }
       );
     } catch (err: any) {
@@ -576,7 +587,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
                       </Select>
                     </div>
                   </div>
-                  {detail.parameters.length > 0 && (
+                  {(
                     <div
                       className="diag-note-box"
                       onDragOver={(e) => e.preventDefault()}
@@ -630,7 +641,10 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
                         const flag = computeFlag(p, resultValues[p.id]) ?? (p.data_type === "numeric" ? null : existing?.flag);
                         return (
                           <tr key={p.id} className={flag && flag !== "normal" ? `diag-row-${flag}` : undefined}>
-                            <td>{p.name}</td>
+                            <td>
+                              {p.name}
+                              {p.auto_created && <span className="diag-badge diag-badge-info" style={{ marginLeft: 6 }} title="Added automatically from an uploaded report. Check the unit and reference range in the catalogue.">NEW</span>}
+                            </td>
                             <td>
                               <Input
                                 value={resultValues[p.id] || ""}
@@ -649,7 +663,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
                           </tr>
                         );
                       })}
-                      {detail.parameters.length === 0 && <tr><td colSpan={5} className="diag-empty">No parameters configured for this test in the catalogue.</td></tr>}
+                      {detail.parameters.length === 0 && <tr><td colSpan={5} className="diag-empty">No parameters configured for this test yet. Upload a report above and every result on it is added as a parameter.</td></tr>}
                     </tbody>
                   </table>
                   <div className="diag-form-actions">
@@ -714,6 +728,7 @@ function ResultImportSummary({ result }: { result: ResultImport }) {
         {result.file_type.toUpperCase()} &middot; {RESULT_PROCESSING_LABELS[result.processing] || result.processing}
         {result.layout ? ` (${result.layout === "long" ? "one row per test" : "one column per test"})` : ""}
         {" "}&middot; {result.values.length} value(s) filled
+        {result.created_parameters?.length ? ` · ${result.created_parameters.length} new parameter(s) added` : ""}
         {result.unmatched?.length ? ` · ${result.unmatched.length} not matched` : ""}
       </summary>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "0.5rem 0" }}>

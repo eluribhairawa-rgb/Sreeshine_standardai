@@ -149,6 +149,9 @@ def _layout(header_row, matcher):
     roles = {_role(c) for c in header_row if c.strip()}
     if "parameter" in roles and "value" in roles:
         return "long"
+    if not matcher.parameters:
+        # Empty catalogue: any non-metadata column holding results counts, they all become new parameters.
+        return "wide" if any(c.strip() and not _role(c) for c in header_row) else None
     param_cols = sum(1 for c in header_row if c.strip() and not _role(c) and matcher.match(c)[0])
     return "wide" if param_cols >= 1 else None
 
@@ -200,7 +203,7 @@ def parse_csv(content, parameters, specimen_nos=()):
         if r and r not in col:
             col[r] = h
 
-    values, skipped, unmatched, mapping = {}, [], [], {}
+    values, skipped, unmatched, mapping, additional = {}, [], [], {}, []
     patient_name = sample_id = ""
 
     def take(param, raw_value, source):
@@ -228,10 +231,15 @@ def parse_csv(content, parameters, specimen_nos=()):
                 # Section headings ("HAEMATOLOGY") have a name but no value: not worth reporting.
                 if row.get(col["value"], "").strip():
                     unmatched.append({"name": name, "value": row.get(col["value"], ""), "reason": reason})
+                    additional.append({"name": name, "value": row.get(col["value"], ""),
+                                       "unit": row.get(col["unit"], "") if col.get("unit") else "",
+                                       "ref_range": row.get(col["ref_range"], "") if col.get("ref_range") else "",
+                                       "reason": reason})
                 continue
             take(param, row.get(col["value"], ""), f'row "{name}"')
     elif layout == "wide":
         param_cols = {}
+        wide_unmatched = []
         for h in headers:
             if role_of[h]:
                 mapping[h] = role_of[h]
@@ -242,6 +250,7 @@ def parse_csv(content, parameters, specimen_nos=()):
                 param_cols[h] = param
             elif re.search(r"\d", "".join(r.get(h, "") for r in rows[:3])):
                 unmatched.append({"name": h, "value": rows[0].get(h, ""), "reason": reason})
+                wide_unmatched.append((h, reason))
         row = rows[0]
         if len(rows) > 1:
             ours = {re.sub(r"[^A-Z0-9]", "", str(n).upper()) for n in specimen_nos if n}
@@ -256,6 +265,8 @@ def parse_csv(content, parameters, specimen_nos=()):
         sample_id = row.get(col["sample_id"], "") if col.get("sample_id") else ""
         for h, param in param_cols.items():
             take(param, row.get(h, ""), f'column "{h}"')
+        additional.extend({"name": h, "value": row.get(h, ""), "unit": "", "ref_range": "", "reason": reason}
+                          for h, reason in wide_unmatched if row.get(h, "").strip())
     else:
         mapping = {h: role_of[h] for h in headers}
         warnings.append(
@@ -263,9 +274,6 @@ def parse_csv(content, parameters, specimen_nos=()):
             f"({', '.join(p['name'] for p in parameters)}). Columns found: {', '.join(headers)}."
         )
 
-    if unmatched:
-        warnings.append(f"{len(unmatched)} result(s) in the file do not match this test's parameters and were not filled: "
-                        + ", ".join(u["name"] for u in unmatched[:8]) + ("..." if len(unmatched) > 8 else ""))
     return {
         "processing": "csv_direct",
         "layout": layout,
@@ -276,6 +284,7 @@ def parse_csv(content, parameters, specimen_nos=()):
         "values": [{"parameter_id": pid, "value": v} for pid, v in values.items()],
         "skipped": skipped,
         "unmatched": unmatched,
+        "additional": additional,
         "equipment": "",
         "patient_name": patient_name,
         "sample_id": sample_id,
@@ -284,7 +293,7 @@ def parse_csv(content, parameters, specimen_nos=()):
 
 
 def _merge_ocr(parts):
-    merged = {"values": [], "skipped": [], "equipment": "", "patient_name": "", "sample_id": ""}
+    merged = {"values": [], "skipped": [], "additional": [], "equipment": "", "patient_name": "", "sample_id": ""}
     seen = set()
     for part in parts:
         for v in part.get("values") or []:
@@ -292,6 +301,7 @@ def _merge_ocr(parts):
                 seen.add(v["parameter_id"])
                 merged["values"].append(v)
         merged["skipped"].extend(part.get("skipped") or [])
+        merged["additional"].extend(part.get("additional") or [])
         for k in ("equipment", "patient_name", "sample_id"):
             merged[k] = merged[k] or part.get(k, "")
     return merged
@@ -319,10 +329,128 @@ def _ocr_summary(result, parameters):
     return result
 
 
+# ---------------------------------------------------------------------------------------
+# Parameters on the report that are not in the test's catalogue yet. They are planned here
+# (pure, no database) and created by the caller, which then calls apply_new_parameters.
+MAX_NEW_PARAMETERS = 60
+MAX_PARAMETER_NAME = 80
+_RANGE_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:-|\u2013|\u2014|to)\s*(-?\d+(?:\.\d+)?)\s*[^\d]*$", re.I)
+_UPPER_RE = re.compile(r"^\s*(?:<|\u2264|up to|upto|less than|upto)\s*=?\s*(-?\d+(?:\.\d+)?)\s*[^\d]*$", re.I)
+_LOWER_RE = re.compile(r"^\s*(?:>|\u2265|more than|greater than)\s*=?\s*(-?\d+(?:\.\d+)?)\s*[^\d]*$", re.I)
+_NOT_A_PARAMETER = {normalize(n) for n in (
+    "patient", "patient name", "name", "age", "sex", "gender", "uhid", "mrn", "sample", "sample id", "sample type",
+    "specimen", "date", "time", "collected", "reported", "referred by", "ref by", "doctor", "remarks", "comments",
+    "method", "page", "lab", "laboratory", "test", "result", "results", "unit", "units", "reference range", "flag",
+)}
+
+
+def _parse_ref_range(text):
+    """(ref_low, ref_high) from a printed range ("13.0 - 17.0", "< 200", "> 40"); (None, None) if not plain."""
+    text = str(text or "").strip()
+    m = _RANGE_RE.match(text)
+    if m:
+        low, high = float(m.group(1)), float(m.group(2))
+        return (low, high) if low <= high else (None, None)
+    m = _UPPER_RE.match(text)
+    if m:
+        return None, float(m.group(1))
+    m = _LOWER_RE.match(text)
+    if m:
+        return float(m.group(1)), None
+    return None, None
+
+
+def _new_parameter(entry):
+    """Catalogue definition + the value to fill, from one extra result; None when it is not a usable result."""
+    name = " ".join(str(entry.get("name") or "").split())
+    raw = str(entry.get("value") or "").strip()
+    key = normalize(name)
+    if not name or not raw or not key or not re.search(r"[A-Za-z]", name):
+        return None
+    if len(name) > MAX_PARAMETER_NAME or key in _NOT_A_PARAMETER or key in _ROLE_LOOKUP:
+        return None
+    if raw in ("-", "--", "NA", "N/A", "na", "n/a"):
+        return None
+    # Numbers become numeric parameters (flagged against the printed range). Censored values ("<0.5") and
+    # words ("Positive") are text parameters, so nothing is invented and no flag is computed.
+    numeric = bool(re.match(r"\s*-?\d", raw)) and qwen_ocr._lab_numeric(raw) is not None
+    value = qwen_ocr._lab_numeric(raw) if numeric else raw
+    ref_text = " ".join(str(entry.get("ref_range") or "").split())[:120]
+    low, high = _parse_ref_range(ref_text) if numeric else (None, None)
+    return {
+        "name": name, "data_type": "numeric" if numeric else "text", "unit": " ".join(str(entry.get("unit") or "").split())[:30],
+        "ref_text": ref_text, "ref_low": low, "ref_high": high, "value": value,
+    }
+
+
+def plan_new_parameters(result, parameters):
+    """Moves the report's extra results into result["new_parameters"] (to be created in the catalogue).
+    An extra that matches an existing parameter by name/synonym fills that parameter instead; ambiguous
+    or unusable ones stay reported as unmatched. Mutates and returns result."""
+    additional = result.pop("additional", None) or []
+    matcher = ParameterMatcher(parameters)
+    have = {v["parameter_id"] for v in result.get("values") or []}
+    new, handled, seen = [], set(), set()
+    for entry in additional:
+        name = entry.get("name")
+        param, reason = matcher.match(name)
+        if param is not None:
+            if param["id"] not in have:
+                value, why = _value_for(param, entry.get("value"))
+                if why:
+                    result.setdefault("skipped", []).append({"parameter_id": param["id"], "parameter_name": param["name"], "value": str(entry.get("value")), "reason": why})
+                elif value is not None:
+                    result["values"].append({"parameter_id": param["id"], "value": value})
+                    have.add(param["id"])
+            handled.add(normalize(name))
+            continue
+        if reason != "no matching parameter on this test":
+            continue  # ambiguous: staff decide
+        candidate = _new_parameter(entry)
+        key = normalize(candidate["name"]) if candidate else None
+        if not candidate or key in seen or len(new) >= MAX_NEW_PARAMETERS:
+            continue
+        seen.add(key)
+        new.append(candidate)
+        handled.add(normalize(name))
+    result["new_parameters"] = new
+    if result.get("unmatched"):
+        result["unmatched"] = [u for u in result["unmatched"] if normalize(u.get("name")) not in handled]
+    left = result.get("unmatched") or []
+    if left and result.get("processing") == "csv_direct":
+        result.setdefault("warnings", []).append(
+            f"{len(left)} result(s) in the file do not match this test's parameters and were not filled: "
+            + ", ".join(u["name"] for u in left[:8]) + ("..." if len(left) > 8 else ""))
+    return result
+
+
+def apply_new_parameters(result, catalogue_rows):
+    """catalogue_rows: the catalogue rows (existing or just created) for result["new_parameters"], in order.
+    Fills their values and lists them as created_parameters; parameters already present are not re-listed."""
+    pending = result.pop("new_parameters", None) or []
+    have = {v["parameter_id"] for v in result["values"]}
+    created = []
+    for cand, row in zip(pending, catalogue_rows):
+        if row.get("auto_created"):
+            created.append({"id": row["id"], "name": row["name"], "data_type": row["data_type"], "unit": row.get("unit"),
+                            "ref_text": row.get("ref_text")})
+        if row["id"] not in have:
+            result["values"].append({"parameter_id": row["id"], "value": cand["value"]})
+            have.add(row["id"])
+    result["created_parameters"] = created
+    if result.get("processing") != "csv_direct":
+        for row in catalogue_rows:
+            result.setdefault("detected_fields", []).append(row["name"])
+            result.setdefault("preview", []).append({"parameter": row["name"], "value": next(
+                (v["value"] for v in result["values"] if v["parameter_id"] == row["id"]), "")})
+    result["row_count"] = max(result.get("row_count", 0), len(result["values"]))
+    return result
+
+
 def import_lab_results(filename, content, parameters, service_name="", patient_name="", specimen_nos=()):
     """Entry point. Raises file_import.FileImportError with an HTTP status on bad input."""
-    if not parameters:
-        raise fi.FileImportError(400, "No parameters are configured for this test in the catalogue.")
+    # A test with no catalogue parameters yet is fine: every result on the report becomes a new parameter.
+    parameters = parameters or []
     fi.check_upload(content)
     file_type = fi.detect_file_type(filename, content)
     if file_type == "csv":
@@ -332,7 +460,8 @@ def import_lab_results(filename, content, parameters, service_name="", patient_n
     else:
         result = _ocr_summary({**fi.call_ocr(qwen_ocr.extract_lab_results, content, parameters, service_name),
                                "processing": "ocr_image"}, parameters)
-    if not result["values"] and not result["skipped"] and file_type != "csv":
+    plan_new_parameters(result, parameters)
+    if not result["values"] and not result["skipped"] and not result["new_parameters"] and file_type != "csv":
         raise fi.FileImportError(422, "No results for this test could be read from the file. Try a clearer, uncropped image.")
     result["identity_warnings"] = qwen_ocr.lab_identity_warnings(result, patient_name, specimen_nos)
     return {"file_type": file_type, "file_name": filename or "", **result}

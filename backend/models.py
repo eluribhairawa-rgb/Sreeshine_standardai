@@ -2312,6 +2312,7 @@ class DiagServiceParameters(Base):
     display_order: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
     calc_formula: Mapped[Optional[str]] = mapped_column(Text)
     comments: Mapped[Optional[str]] = mapped_column(Text)
+    auto_created: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
 
     service: Mapped['DiagServices'] = relationship('DiagServices', back_populates='diag_service_parameters')
 

@@ -7597,10 +7597,13 @@ def list_pharmacy_returns(db, status=None, admission_id=None, patient_id=None):
     with get_connection(db) as conn:
         cursor = conn.cursor()
         query = """
-            SELECT r.*, pi.medicine_name, pi.batch_no, ps.patient_id, ps.admission_id, ps.invoice_id, ps.unit_price
+            SELECT r.*, pi.medicine_name, pi.batch_no, ps.patient_id, ps.admission_id, ps.invoice_id, ps.unit_price,
+                   COALESCE(NULLIF(TRIM(COALESCE(p.name, '') || ' ' || COALESCE(p.last_name, '')), ''), pd.patient_name) AS patient_name
             FROM pharmacy_returns r
             JOIN pharmacy_inventory pi ON pi.id = r.pharmacy_inventory_id
             JOIN pharmacy_sales ps ON ps.id = r.original_sale_id
+            LEFT JOIN patients p ON p.patient_id = ps.patient_id
+            LEFT JOIN pharmacy_dispense pd ON pd.id = ps.dispense_id
             WHERE 1=1
         """
         params = []
@@ -11645,6 +11648,55 @@ def list_diag_service_parameters(db, service_id):
         )
         return cursor.fetchall()
 
+
+
+def ensure_diag_service_parameters(db, service_id, candidates, username=None, match_existing=None):
+    """Adds report parameters that are not yet in a test's catalogue (lab result import).
+
+    candidates: [{name, data_type, unit, ref_text, ref_low, ref_high}] taken from the uploaded report.
+    match_existing(name, rows) -> row | None lets the caller reuse its own name matching (synonyms) so a
+    parameter already in the catalogue under another spelling is never duplicated.
+    Returns (rows, created_ids): the catalogue row for every candidate (existing or new), in order.
+    New rows are flagged auto_created so staff can review them, and are optional when finalizing so
+    other orders of the same test are not blocked by a parameter they never had."""
+    with get_connection(db) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM diag_services WHERE id = ?", (service_id,))
+        if not cursor.fetchone():
+            raise ValueError("Service not found.")
+        # Serialise concurrent imports for the same test so two uploads cannot both add "Ferritin".
+        cursor.execute("SELECT pg_advisory_xact_lock(?)", (910000000 + int(service_id),))
+        cursor.execute("SELECT * FROM diag_service_parameters WHERE service_id = ? ORDER BY display_order ASC, id ASC", (service_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        next_order = max([r.get("display_order") or 0 for r in rows] + [len(rows) - 1]) + 1
+        out, created = [], []
+        for c in candidates:
+            name = " ".join(str(c.get("name") or "").split())[:120]
+            if not name:
+                continue
+            hit = match_existing(name, rows) if match_existing else next((r for r in rows if r["name"].strip().lower() == name.lower()), None)
+            if hit:
+                out.append(hit)
+                continue
+            data_type = c.get("data_type") if c.get("data_type") in ("numeric", "text", "qualitative") else "text"
+            cursor.execute(
+                """
+                INSERT INTO diag_service_parameters (
+                    service_id, name, data_type, unit, ref_low, ref_high, ref_text, display_order, comments, auto_created
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
+                """,
+                (service_id, name, data_type, (c.get("unit") or None), c.get("ref_low"), c.get("ref_high"),
+                 (c.get("ref_text") or None), next_order,
+                 f"Auto-created from an uploaded report by {username or 'system'}. Review the unit and reference range."),
+            )
+            cursor.execute("SELECT * FROM diag_service_parameters WHERE id = ?", (cursor.lastrowid,))
+            row = dict(cursor.fetchone())
+            rows.append(row)
+            out.append(row)
+            created.append(row["id"])
+            next_order += 1
+        conn.commit()
+        return out, created
 
 
 def replace_diag_service_parameters(db, service_id, parameters):
