@@ -6,6 +6,7 @@ import { filterDecimal, filterPercent, percentOf, preventNonNumericDiscountKeys 
 import type { Notice } from "../../types";
 import { Button, Modal } from "../../components/ui";
 import { printViaIframe } from "../../lib/printViaIframe";
+import EmergencyCertificateModal from "../../components/EmergencyCertificateModal";
 import { buildPrintDocumentHtml } from "../../lib/printTemplates";
 import { splitStoredPhone, toWhatsAppNumber } from "../../lib/phone";
 import "./billingTheme.css";
@@ -71,6 +72,7 @@ export default function IpDischargeBillingPage({
 
   // Settlement Finalisation modal state
   const [finaliseModalOpen, setFinaliseModalOpen] = useState(false);
+  const [certificateOpen, setCertificateOpen] = useState(false);
   const [payerModalOpen, setPayerModalOpen] = useState(false);
   const [payerDraft, setPayerDraft] = useState<AdmissionPayer>(EMPTY_PAYER);
   const [savingPayer, setSavingPayer] = useState(false);
@@ -276,7 +278,9 @@ export default function IpDischargeBillingPage({
           ? `Discharge bill for Admission #${res.admission_id} billed to ${res.insurer_name || "the insurer"}: ₹${fmt(res.remaining_due)} due from the insurer. Invoice ${res.invoice_no || ""}`
           : `Discharge bill finalized successfully for Admission #${res.admission_id}! Invoice ${res.invoice_no || ""}`,
       });
-      fetchDischarge(String(res.admission_id));
+      await fetchDischarge(String(res.admission_id));
+      // The patient is now discharged: generate the emergency / essentiality certificate straight away.
+      setCertificateOpen(true);
     } catch (err: any) {
       reportError(setNotice, err, "Failed to finalise discharge bill.");
     } finally {
@@ -660,6 +664,17 @@ export default function IpDischargeBillingPage({
             title="Share bill details to patient's WhatsApp"
           >
             💬 Share via WhatsApp
+          </button>
+
+          <button
+            type="button"
+            className="billing-btn-outline"
+            style={{ borderColor: "#7c3aed", color: "#6d28d9", fontWeight: 700, background: "#f5f3ff" }}
+            disabled={dischargeData?.status !== "finalised"}
+            onClick={() => setCertificateOpen(true)}
+            title={dischargeData?.status === "finalised" ? "Generate the emergency / essentiality certificate" : "Available once the patient is discharged and the bill is finalised"}
+          >
+            📜 Emergency Certificate
           </button>
         </div>
       </div>
@@ -1719,6 +1734,8 @@ export default function IpDischargeBillingPage({
           </div>
         </div>
       </div>
+
+      <EmergencyCertificateModal open={certificateOpen} onClose={() => setCertificateOpen(false)} dischargeData={dischargeData} setNotice={setNotice} />
 
       {/* Modal: Review & Finalise Bill */}
       {payerModalOpen && (

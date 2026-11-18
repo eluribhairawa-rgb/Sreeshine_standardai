@@ -4,6 +4,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { Button, Input, Label, Modal, Select } from "../components/ui";
 import { apiFetch, reportError } from "../lib/api";
 import type { Notice } from "../types";
+import EmergencyCertificateModal from "../components/EmergencyCertificateModal";
 
 type Props = {
   setNotice: Dispatch<SetStateAction<Notice | null>>;
@@ -93,6 +94,8 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
     notes: "Discharged in stable condition",
   });
   const [submittingDischarge, setSubmittingDischarge] = useState(false);
+  // Emergency / essentiality certificate for a discharged admission (id or patient id of the latest admission).
+  const [certificateKey, setCertificateKey] = useState<string | number | null>(null);
   // The attending doctor's clinical notes for the open patient's current admission (Doctor Clinicals module).
   const [viewNotes, setViewNotes] = useState<{ id: number; doctor_name: string; subjective?: string | null; objective_analysis?: string | null; diagnosis?: string | null; treatment_plan?: string | null; prognosis?: string | null; discharge_readiness: string; created_at?: string | null;
     presenting_complaints?: string | null; clinical_course?: string | null; key_investigations?: string | null; procedures?: string | null; treatment_given?: string | null; condition_at_discharge?: string | null; advice?: string | null; follow_up?: string | null }[]>([]);
@@ -223,6 +226,8 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
       setDischargeStep("view");
       setDischargePreview(null);
       await loadInpatients();
+      // Discharged: generate the certificate straight away (print / share on WhatsApp).
+      setCertificateKey(bed.patient_id);
     } catch (error) {
       reportError(setNotice, error as { message?: string; status?: number }, "Unable to settle the discharge bill.");
     } finally {
@@ -290,7 +295,7 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem" }}>Loading…</td></tr>}
+              {loading && <tr><td colSpan={5} style={{ textAlign: "center", padding: "1rem" }}>Loading…</td></tr>}
               {!loading && filtered.length === 0 && (
                 <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem", color: "#94a3b8" }}>No patients currently admitted.</td></tr>
               )}
@@ -334,12 +339,13 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
                 <th>Ward / Room / Bed</th>
                 <th>Admitted</th>
                 <th>Discharged</th>
+                <th>Certificate</th>
               </tr>
             </thead>
             <tbody>
               {loadingDischarged && <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem" }}>Loading…</td></tr>}
               {!loadingDischarged && discharged.length === 0 && (
-                <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem", color: "#94a3b8" }}>No discharged patients found for this filter.</td></tr>
+                <tr><td colSpan={5} style={{ textAlign: "center", padding: "1rem", color: "#94a3b8" }}>No discharged patients found for this filter.</td></tr>
               )}
               {!loadingDischarged && discharged.map((d) => (
                 <tr key={d.admission_id}>
@@ -354,12 +360,17 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
                   <td style={{ color: "#0f172a", fontWeight: 600 }}>
                     {d.discharged_at ? new Date(d.discharged_at).toLocaleString() : (d.discharge_date || "-")}
                   </td>
+                  <td>
+                    <Button variant="secondary" size="sm" onClick={() => setCertificateKey(d.admission_id)}>📜 Certificate</Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      <EmergencyCertificateModal open={certificateKey != null} onClose={() => setCertificateKey(null)} admissionKey={certificateKey} setNotice={setNotice} />
 
       <Modal open={!!viewPatient} onClose={() => { setViewPatient(null); setDischargeStep("view"); }} title={viewPatient ? `${viewPatient.patient_name} (${viewPatient.patient_id})` : ""}>
         {viewPatient && dischargeStep === "view" && (

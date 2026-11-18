@@ -856,6 +856,50 @@ def _release_admission_beds(cursor, admission_id):
             )
 
 
+def _stay_paid_bills(cursor, patient_id, adm) -> dict:
+    """What lab / pharmacy / the ward billed and what the patient paid during this stay (for the emergency /
+    essentiality certificate): invoices by module dated inside the stay, plus confirmed lab orders and
+    pharmacy sales in the stay that may not have an invoice yet."""
+    window = ("created_at >= CAST(? AS date) AND created_at < (COALESCE(CAST(? AS date), CURRENT_DATE) + INTERVAL '1 day')")
+    args = (patient_id, adm["admission_date"], adm["discharge_date"])
+    cursor.execute(
+        f"""
+        SELECT UPPER(COALESCE(module, '')) AS module, COALESCE(SUM(paid_amount), 0) AS paid, COALESCE(SUM(total_amount), 0) AS billed
+        FROM invoices WHERE patient_id = ? AND {window}
+        GROUP BY UPPER(COALESCE(module, ''))
+        """,
+        args,
+    )
+    inv = {str(r["module"]): (float(r["paid"] or 0), float(r["billed"] or 0)) for r in cursor.fetchall()}
+    cursor.execute(
+        f"""
+        SELECT COALESCE(SUM(oi.amount), 0) AS amt
+        FROM diag_orders o JOIN diag_order_items oi ON oi.order_id = o.id
+        WHERE o.patient_id = ? AND o.status = 'confirmed' AND oi.cancelled_at IS NULL
+          AND o.created_at >= CAST(? AS date) AND o.created_at < (COALESCE(CAST(? AS date), CURRENT_DATE) + INTERVAL '1 day')
+        """,
+        args,
+    )
+    lab_ordered = float((cursor.fetchone() or {"amt": 0})["amt"] or 0)
+    cursor.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS amt FROM pharmacy_sales
+        WHERE patient_id = ? AND sold_at >= CAST(? AS date) AND sold_at < (COALESCE(CAST(? AS date), CURRENT_DATE) + INTERVAL '1 day')
+        """,
+        args,
+    )
+    pharmacy_sold = float((cursor.fetchone() or {"amt": 0})["amt"] or 0)
+    ip_paid, ip_billed = inv.get("IP", (0.0, 0.0))
+    lab_paid, lab_billed = inv.get("LAB", (0.0, 0.0))
+    ph_paid, ph_billed = inv.get("PHARMACY", (0.0, 0.0))
+    return {
+        "inpatient": ip_paid, "laboratory": lab_paid, "pharmacy": ph_paid,
+        # What was charged (billed, or ordered / sold when not invoiced yet): used to fill the certificate.
+        "laboratory_billed": max(lab_billed, lab_ordered), "pharmacy_billed": max(ph_billed, pharmacy_sold),
+    }
+
+
+
 def get_ip_discharge_details(db: Session, admission_id: Any):
     """
     Consolidates admission charges without creating duplicate bills (Check B).
@@ -1195,6 +1239,7 @@ def get_ip_discharge_details(db: Session, admission_id: Any):
             },
             "payments": payment_items,
             "advances": advances,
+            "paid_bills": _stay_paid_bills(cursor, patient_id, adm),
             "charges_version": charges_version,
             "status": "financial_review" if not adm["discharge_date"] else "finalised"
         }
