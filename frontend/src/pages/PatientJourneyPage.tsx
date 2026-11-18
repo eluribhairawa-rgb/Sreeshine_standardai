@@ -6,6 +6,7 @@ import { generatePDFBlob, downloadPDF, printPDF, patientFilename } from "../lib/
 import { sharePdfFile } from "../lib/whatsappPdfShare";
 import type { StandardPdfPayload } from "../lib/exportService";
 import { Button, Modal } from "../components/ui";
+import EmergencyCertificateModal from "../components/EmergencyCertificateModal";
 import type { Notice, Patient } from "../types";
 
 type Props = {
@@ -46,6 +47,9 @@ type JourneyEvent = {
   subtotal?: number;
   items?: { name: string; quantity: number; unit_price: number; amount: number }[];
   report_id?: number;
+  certificate_id?: number;
+  admission_id?: number;
+  details?: [string, string][];
   invoice_no?: string | null;
   prescription?: JourneyPrescription;
   clinical_note?: { id: number; doctor: string; subjective: string; objective_analysis: string; diagnosis: string; treatment_plan: string; prognosis: string; discharge_readiness: string;
@@ -118,6 +122,7 @@ function formatDateHeading(iso: string) {
 
 function eventDotColor(type: string) {
   if (type === "discharge" || type === "disposition") return "#16a34a";
+  if (type === "certificate") return "#7c3aed";
   if (type === "nursing_note") return "#7c3aed";
   if (type === "bed_allocated" || type === "bed_released") return "#0ea5e9";
   if (type === "advance") return "#16a34a";
@@ -141,7 +146,7 @@ const EVENT_DEPARTMENTS: Record<string, string> = {
   medication_order: "Pharmacy", surgery: "Surgery",
   prescription: "Consultation", pharmacy_issued: "Pharmacy", pharmacy_returned: "Pharmacy",
   lab_bill: "Diagnostics", lab_collected: "Diagnostics", imaging_completed: "Diagnostics", report_released: "Diagnostics",
-  critical_alert: "Diagnostics", critical_ack: "Diagnostics",
+  critical_alert: "Diagnostics", critical_ack: "Diagnostics", certificate: "Discharge",
 };
 
 export default function PatientJourneyPage({ setNotice, onNavigate, selectedPatient }: Props) {
@@ -176,6 +181,8 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
   const [payMode, setPayMode] = useState("");
   const [paying, setPaying] = useState(false);
   const [exporting, setExporting] = useState<"" | "pdf" | "print" | "whatsapp">("");
+  // Emergency / essentiality certificate of an admission (opens the same window used at discharge).
+  const [certificateAdmission, setCertificateAdmission] = useState<number | null>(null);
   const [reportModal, setReportModal] = useState<{ title: string; loading: boolean; content: Record<string, unknown> | null } | null>(null);
 
   useEffect(() => {
@@ -811,7 +818,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                   {dayEvents.map((e, idx) => {
                     const globalIdx = journey.events.indexOf(e);
                     const isExpanded = expandAll || expandedEvents.has(globalIdx);
-                    const hasItems = (e.items && e.items.length > 0) || !!e.prescription || !!e.clinical_note;
+                    const hasItems = (e.items && e.items.length > 0) || !!e.prescription || !!e.clinical_note || (e.details && e.details.length > 0);
                     return (
                       <div key={`${date}-${idx}`} style={{ display: "grid", gridTemplateColumns: "56px 1fr auto", gap: "6px", padding: "9px 6px", borderBottom: "1px solid #f1f5f9" }}>
                         <div style={{ fontSize: "11.5px", color: "#64748b", paddingTop: "2px" }}>{e.time}</div>
@@ -826,10 +833,27 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                             )}
                           </div>
                           <div style={{ fontSize: "12px", color: "#64748b", marginLeft: "16px" }}>{e.subtitle}</div>
+                          {e.type === "certificate" && e.admission_id && (
+                            <button type="button" onClick={() => setCertificateAdmission(e.admission_id!)} style={{ marginLeft: "16px", fontSize: "12px", fontWeight: 700, color: "#7c3aed", background: "none", border: "none", cursor: "pointer" }}>
+                              View / print certificate →
+                            </button>
+                          )}
                           {e.report_id && (
                             <button type="button" onClick={() => void openReport(e.report_id!, e.title)} style={{ marginLeft: "16px", fontSize: "12px", fontWeight: 700, color: "#0891b2", background: "none", border: "none", cursor: "pointer" }}>
                               View report →
                             </button>
+                          )}
+                          {isExpanded && e.details && e.details.length > 0 && (
+                            <div style={{ marginLeft: "16px", marginTop: "8px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "10px", padding: "12px 14px" }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "10px 16px" }}>
+                                {e.details.map(([label, value]) => (
+                                  <div key={label}>
+                                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
+                                    <div style={{ fontSize: "13px", color: "#0f172a", fontWeight: 600 }}>{value}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
                           )}
                           {hasItems && isExpanded && e.clinical_note && (
                             <div style={{ marginLeft: "16px", marginTop: "6px", background: "#eff6ff", borderRadius: "6px", padding: "8px 10px", fontSize: "12px", color: "#1e3a8a", display: "grid", gap: "3px" }}>
@@ -976,6 +1000,8 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                             setReportModal({ title: "Pharmacy issue slip", loading: false, content: { "Medicines": evt?.items?.map((it) => `${it.name} × ${it.quantity} = ${formatCurrency(it.amount)}`).join("; ") || "-" } });
                           } else if (d.type === "final_bill") {
                             setReportModal({ title: "Final bill", loading: false, content: { "Total charges": formatCurrency(fs.total_charges), "Payments received": formatCurrency(fs.payments_received), "Outstanding": formatCurrency(fs.outstanding) } });
+                          } else if (d.type === "emergency_certificate") {
+                            if (d.ref) setCertificateAdmission(d.ref);
                           } else if (d.type === "discharge_summary") {
                             const evt = journey.events.find((e) => e.type === "discharge");
                             setReportModal({ title: "Discharge summary", loading: false, content: { "Discharged": `${evt?.date || ""} ${evt?.time || ""}`, "Notes": evt?.subtitle || "-" } });
@@ -1049,6 +1075,8 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
           </div>
         </div>
       )}
+
+      <EmergencyCertificateModal open={certificateAdmission != null} onClose={() => setCertificateAdmission(null)} admissionKey={certificateAdmission} setNotice={setNotice} />
 
       {reportModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }} onClick={() => setReportModal(null)}>

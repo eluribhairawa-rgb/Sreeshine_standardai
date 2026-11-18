@@ -12,6 +12,7 @@ import { calculateAgeFromDob, formatDate, formatDateTimeIST, getISTDateKey, getI
 import { printViaIframe } from "../lib/printViaIframe";
 import { exportPDF, downloadPDF, patientFilename } from "../lib/exportService";
 import { shareHtmlAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
+import { certificateReadableText } from "../components/EmergencyCertificateModal";
 import { PRINT_BRAND_HEADER_DATA_URI, PRINT_WATERMARK_DATA_URI } from "../lib/printBrand";
 import type { Admission, BedAllocation, Certificate, DocumentItem, Encounter, MedicationSchedule, Notice, ObservationNote, Patient, PatientMovement, PatientVital } from "../types";
 
@@ -229,7 +230,7 @@ export default function PatientsPage({
         Issued by: ${safeText(certificate.issued_by || "HospAI")}<br/>
         Created at: ${safeText(certificate.created_at ? formatDateTimeIST(certificate.created_at) : new Date().toLocaleString("en-IN"))}
       </div>
-      <div class="cert-body-text">${safeText(certificate.body)}</div>
+      <div class="cert-body-text">${safeText(certificateReadableText(certificate.body))}</div>
     </div>
     
   </div>
@@ -1938,7 +1939,7 @@ function PatientDetail({
           ${certificate.admission_id ? `<div class="meta">Admission: #${certificate.admission_id}</div>` : ""}
           ${certificate.issued_by ? `<div class="meta">Issued by: ${certificate.issued_by}</div>` : ""}
           ${certificate.created_at ? `<div class="meta">Created at: ${formatDateTimeIST(certificate.created_at)}</div>` : ""}
-          <div class="certificate-body">${certificate.body ? certificate.body.replace(/</g, "&lt;").replace(/>/g, "&gt;") : ""}</div>
+          <div class="certificate-body">${certificate.body ? certificateReadableText(certificate.body).replace(/</g, "&lt;").replace(/>/g, "&gt;") : ""}</div>
         </body>
       </html>`;
 
@@ -2464,7 +2465,7 @@ function PatientDetail({
                       {certificate.admission_id ? ` · Admission #${certificate.admission_id}` : ""}
                       {certificate.issued_by ? ` · Issued by ${certificate.issued_by}` : ""}
                     </p>
-                    <p>{certificate.body}</p>
+                    <p>{certificateReadableText(certificate.body)}</p>
                     <div className="module-inline-actions">
                       <Button
                         type="button"

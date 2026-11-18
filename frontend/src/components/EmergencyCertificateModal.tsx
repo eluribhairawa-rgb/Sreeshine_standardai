@@ -42,6 +42,16 @@ export function rupeesInWords(amount: number): string {
 }
 
 const money = (n: number) => Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const DATA_MARK = "[[cert-data:";
+/** The saved certificate carries its form values after the readable text, so it can be reopened exactly as issued. */
+const withData = (text: string, data: unknown) => `${text}\n\n${DATA_MARK}${JSON.stringify(data)}]]`;
+export const certificateReadableText = (body: string) => String(body || "").split(DATA_MARK)[0].trim();
+const readData = (body: string) => {
+  const i = String(body || "").indexOf(DATA_MARK);
+  if (i < 0) return null;
+  try { return JSON.parse(String(body).slice(i + DATA_MARK.length).replace(/\]\]\s*$/, "")); } catch { return null; }
+};
+
 const esc = (v: unknown) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const dmy = (value?: string | null) => {
@@ -57,8 +67,10 @@ const hm = (value?: string | null) => {
   return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }).toUpperCase();
 };
 
-const fieldStyle: React.CSSProperties = { width: "100%", padding: "7px 9px", border: "1px solid #cbd5e1", borderRadius: 6, fontSize: 13, boxSizing: "border-box" };
-const labelStyle: React.CSSProperties = { display: "block", fontSize: 11, fontWeight: 700, color: "#475569", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.03em" };
+const fieldStyle: React.CSSProperties = { width: "100%", padding: "9px 11px", border: "1px solid #94a3b8", borderRadius: 8, fontSize: 14, color: "#0f172a", background: "#ffffff", boxSizing: "border-box" };
+const labelStyle: React.CSSProperties = { display: "block", fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 };
+const sectionStyle: React.CSSProperties = { border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 14px", marginBottom: 12, background: "#f8fafc" };
+const sectionTitle: React.CSSProperties = { margin: "0 0 10px", fontSize: 13, fontWeight: 800, color: "#0f766e", textTransform: "uppercase", letterSpacing: "0.04em" };
 
 /** Emergency + Essentiality certificate generated after an inpatient is discharged: print it or share the PDF on WhatsApp. */
 export default function EmergencyCertificateModal({ open, onClose, dischargeData: givenData, admissionKey, setNotice }: Props) {
@@ -83,6 +95,7 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, admissionKey, givenData]);
   const savedRef = useRef(false);
+  const savedBodyRef = useRef("");
 
   const patientName = [p.name, p.middle_name, p.last_name].filter(Boolean).join(" ").trim();
   const isFemale = String(p.gender || "").toLowerCase().startsWith("f");
@@ -107,6 +120,7 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
   useEffect(() => {
     if (!open) return;
     savedRef.current = false;
+    savedBodyRef.current = "";
     setForm({
       name: patientName, relation: isFemale ? "D/O" : "S/O", guardian: "", age: p.age != null ? String(p.age) : "",
       gender: isFemale ? "female" : String(p.gender || "").toLowerCase().startsWith("m") ? "male" : "",
@@ -127,6 +141,13 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
           const dx = res?.summary?.content?.diagnosis;
           if (dx && !cancelled) setForm((f) => (f.diagnosis ? f : { ...f, diagnosis: dx }));
         }
+      } catch { /* optional */ }
+      try {
+        // A certificate already issued for this stay is reopened exactly as it was issued.
+        const certs = await apiFetch<{ certificates?: { id: number; admission_id?: number | null; certificate_type?: string; body?: string }[] }>(`/api/patients/${pid}/certificates`);
+        const saved = (certs?.certificates || []).find((c) => c.certificate_type === "emergency_essentiality" && (!a.id || Number(c.admission_id) === Number(a.id)));
+        const data = saved ? readData(saved.body || "") : null;
+        if (data && !cancelled) { setForm((f) => ({ ...f, ...data })); savedBodyRef.current = saved?.body || ""; }
       } catch { /* optional */ }
       try {
         const appts = await apiFetch<{ appointments?: { department?: string }[] }>(`/api/appointments?patient_id=${pid}`);
@@ -156,7 +177,7 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
     const chargeRows = lines.length
       ? lines.map(([label, amt], i) => `<tr><td>${i + 1}.</td><td>${label}</td><td class="amt">Rs. ${money(amt)}</td></tr>`).join("")
       : `<tr><td colspan="3">-</td></tr>`;
-    return `<!doctype html><html><head><meta charset="utf-8"><title>Emergency &amp; Essentiality Certificate</title>
+    return `<!doctype html><html><head><meta charset="utf-8"><title>Emergency and Essentiality Certificate</title>
   <style>
     body { font-family: "Times New Roman", Georgia, serif; color: #111; font-size: 12.5pt; line-height: 1.55; }
     h2.cert { text-align: center; font-size: 14pt; text-decoration: underline; margin: 6mm 0 6mm; text-transform: uppercase; }
@@ -203,13 +224,14 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
   // The generated certificate is kept on the patient's record (once per opening), then printed / shared.
   const keepRecord = async () => {
     if (savedRef.current || !p.patient_id) return;
+    if (savedBodyRef.current && savedBodyRef.current === withData(plainText(), form)) return; // already on record, unchanged
     savedRef.current = true;
     try {
       await apiFetch(`/api/patients/${encodeURIComponent(p.patient_id)}/certificates`, {
         method: "POST",
         body: JSON.stringify({
           certificate_type: "emergency_essentiality", title: "Emergency & Essentiality Certificate",
-          body: plainText(), admission_id: a.id || undefined,
+          body: withData(plainText(), form), admission_id: a.id || undefined,
         }),
       });
     } catch {
@@ -242,47 +264,66 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
   };
 
   return (
-    <Modal open={open} title="Emergency & Essentiality Certificate" onClose={onClose}>
-      <div style={{ padding: "0.25rem 0" }}>
-        {loadingData && <p className="muted">Loading discharge record…</p>}
-        <p className="muted" style={{ marginTop: 0 }}>Generated from the discharge record. Check the details, then print or share the PDF on WhatsApp.</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
-          <div><label style={labelStyle}>Patient name</label><input style={fieldStyle} value={form.name} onChange={set("name")} /></div>
-          <div>
-            <label style={labelStyle}>Relation / guardian</label>
-            <div style={{ display: "flex", gap: 6 }}>
-              <select style={{ ...fieldStyle, width: 74 }} value={form.relation} onChange={set("relation")}>
-                <option>S/O</option><option>D/O</option><option>W/O</option><option>C/O</option>
+    <Modal open={open} title="Emergency & Essentiality Certificate" onClose={onClose} className="ui-modal-wide">
+      <div style={{ padding: "0.25rem 0", color: "#0f172a" }}>
+        {loadingData && <p style={{ margin: "0 0 8px", color: "#475569" }}>Loading discharge record…</p>}
+        <p style={{ margin: "0 0 14px", color: "#475569", fontSize: 13.5 }}>
+          Filled from the discharge record. Check the details below, then print the certificate or share it as a PDF on WhatsApp.
+        </p>
+
+        <section style={sectionStyle}>
+          <h4 style={sectionTitle}>Patient</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+            <div style={{ gridColumn: "span 6" }}><label style={labelStyle}>Patient name *</label><input style={fieldStyle} value={form.name} onChange={set("name")} /></div>
+            <div style={{ gridColumn: "span 3" }}><label style={labelStyle}>Age (years)</label><input style={fieldStyle} value={form.age} onChange={set("age")} /></div>
+            <div style={{ gridColumn: "span 3" }}>
+              <label style={labelStyle}>Gender</label>
+              <select style={fieldStyle} value={form.gender} onChange={set("gender")}>
+                <option value="">Select</option><option value="male">Male</option><option value="female">Female</option>
               </select>
-              <input style={fieldStyle} value={form.guardian} onChange={set("guardian")} placeholder="Father / husband name" />
+            </div>
+            <div style={{ gridColumn: "span 3" }}>
+              <label style={labelStyle}>Relation</label>
+              <select style={fieldStyle} value={form.relation} onChange={set("relation")}>
+                <option value="S/O">S/O (son of)</option><option value="D/O">D/O (daughter of)</option>
+                <option value="W/O">W/O (wife of)</option><option value="C/O">C/O (care of)</option>
+              </select>
+            </div>
+            <div style={{ gridColumn: "span 9" }}><label style={labelStyle}>Father / husband / guardian name</label><input style={fieldStyle} value={form.guardian} onChange={set("guardian")} placeholder="Name to print after the relation" /></div>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <h4 style={sectionTitle}>Admission</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Admitted on</label><input style={fieldStyle} value={form.admittedDate} onChange={set("admittedDate")} placeholder="DD-MM-YYYY" /></div>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Admitted at</label><input style={fieldStyle} value={form.admittedTime} onChange={set("admittedTime")} placeholder="11:30 PM" /></div>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Discharged on</label><input style={fieldStyle} value={form.dischargedDate} onChange={set("dischargedDate")} placeholder="DD-MM-YYYY" /></div>
+            <div style={{ gridColumn: "span 12" }}><label style={labelStyle}>Department *</label><input style={fieldStyle} value={form.department} onChange={set("department")} placeholder="e.g. General Surgery" /></div>
+            <div style={{ gridColumn: "span 12" }}>
+              <label style={labelStyle}>Diagnosis *</label>
+              <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.diagnosis} onChange={set("diagnosis")} placeholder="e.g. Right upper ureteric calculus" />
             </div>
           </div>
-          <div><label style={labelStyle}>Age</label><input style={fieldStyle} value={form.age} onChange={set("age")} /></div>
-          <div>
-            <label style={labelStyle}>Gender</label>
-            <select style={fieldStyle} value={form.gender} onChange={set("gender")}>
-              <option value="">-</option><option value="male">male</option><option value="female">female</option>
-            </select>
+        </section>
+
+        <section style={sectionStyle}>
+          <h4 style={sectionTitle}>Charges (Rs.)</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Hospitalization</label><input style={fieldStyle} inputMode="decimal" value={form.hospitalization} onChange={set("hospitalization")} placeholder="Amount" /></div>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Lab investigation</label><input style={fieldStyle} inputMode="decimal" value={form.lab} onChange={set("lab")} placeholder="Amount" /></div>
+            <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Medicine</label><input style={fieldStyle} inputMode="decimal" value={form.medicine} onChange={set("medicine")} placeholder="Amount" /></div>
           </div>
-          <div><label style={labelStyle}>Admitted on (DD-MM-YYYY)</label><input style={fieldStyle} value={form.admittedDate} onChange={set("admittedDate")} /></div>
-          <div><label style={labelStyle}>Admitted at</label><input style={fieldStyle} value={form.admittedTime} onChange={set("admittedTime")} placeholder="11:30 PM" /></div>
-          <div><label style={labelStyle}>Discharged on</label><input style={fieldStyle} value={form.dischargedDate} onChange={set("dischargedDate")} /></div>
-          <div><label style={labelStyle}>Department</label><input style={fieldStyle} value={form.department} onChange={set("department")} placeholder="e.g. General Surgery" /></div>
-        </div>
-        <div style={{ marginTop: 10 }}>
-          <label style={labelStyle}>Diagnosis</label>
-          <textarea style={{ ...fieldStyle, minHeight: 56 }} value={form.diagnosis} onChange={set("diagnosis")} placeholder="Right upper ureteric calculus" />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginTop: 10 }}>
-          <div><label style={labelStyle}>Hospitalization (Rs.)</label><input style={fieldStyle} inputMode="decimal" value={form.hospitalization} onChange={set("hospitalization")} placeholder="Enter amount" /></div>
-          <div><label style={labelStyle}>Lab investigation (Rs.)</label><input style={fieldStyle} inputMode="decimal" value={form.lab} onChange={set("lab")} placeholder="Enter amount" /></div>
-          <div><label style={labelStyle}>Medicine (Rs.)</label><input style={fieldStyle} inputMode="decimal" value={form.medicine} onChange={set("medicine")} placeholder="Enter amount" /></div>
-        </div>
-        <p style={{ margin: "10px 0 0", fontWeight: 700 }}>Total Rs. {money(total)} <span className="muted" style={{ fontWeight: 400 }}>({rupeesInWords(total)} rupees only)</span></p>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 12, padding: "10px 12px", background: "#f0fdfa", border: "1px solid #99f6e4", borderRadius: 8 }}>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Total Rs. {money(total)}</div>
+            <div style={{ color: "#334155", fontSize: 13 }}>{rupeesInWords(total)} rupees only</div>
+          </div>
+        </section>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
           <Button variant="secondary" onClick={onClose}>Close</Button>
           <Button variant="secondary" onClick={() => void handlePrint()}>🖨️ Print</Button>
-          <Button onClick={() => void handleShare()} style={{ background: "#16a34a", borderColor: "#16a34a" }}>💬 Share PDF on WhatsApp</Button>
+          <Button onClick={() => void handleShare()} style={{ background: "#16a34a", borderColor: "#16a34a", color: "#fff" }}>💬 Share PDF on WhatsApp</Button>
         </div>
       </div>
     </Modal>

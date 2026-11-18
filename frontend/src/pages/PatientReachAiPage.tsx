@@ -1356,7 +1356,7 @@ export default function PatientReachAiPage({ setNotice, selectedPatient: initial
                                 <span style={{ fontWeight: 700, color: "#1e293b" }}>{cert.title}</span>
                                 <span style={{ color: "#94a3b8", fontSize: "11px" }}>{cert.created_at ? fmtDate(cert.created_at) : ""}</span>
                               </div>
-                              <p style={{ margin: "4px 0 0", color: "#475569", fontSize: "12px" }}>{cert.body}</p>
+                              <p style={{ margin: "4px 0 0", color: "#475569", fontSize: "12px" }}>{(cert.body || "").split("[[cert-data:")[0].trim()}</p>
                             </div>
                           ))}
                         </div>

@@ -62,6 +62,24 @@ def _parse_dt(value):
         return None
 
 
+def _pretty_dt(value):
+    """'27 Oct 2026, 04:23 PM' for the timeline detail panels."""
+    dt = _parse_dt(value)
+    return dt.strftime("%d %b %Y, %I:%M %p") if dt else None
+
+
+def _details(*pairs):
+    """Label/value rows for an event's expandable detail panel; empty values are dropped."""
+    return [[label, str(value)] for label, value in pairs if value not in (None, "", "-")]
+
+
+def _money(value):
+    try:
+        return f"₹{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
 def _bed_days(b, now):
     """Days billed on one bed: started-day rounded up, like the discharge bill (at least 1)."""
     start = _parse_dt(b.get("allocated_at"))
@@ -85,16 +103,27 @@ def _ip_stay_events(cursor, patient_id, admission_id, admission, beds, window_st
     events = []
     for b in beds:
         d, t = _split_dt(b.get("allocated_at"))
+        now_dt = datetime.now()
         events.append({"date": d, "time": t, "type": "bed_allocated", "title": "Bed allotted" if b is beds[0] else "Bed transfer",
                         "subtitle": " · ".join(p for p in [
                             _bed_label(b), b.get("bed_type") or "",
                             f"₹{_rate(b):,.0f}/day" if _rate(b) else "",
                             _dr(b.get("assigned_doctor")),
-                        ] if p), "charge": None, "received": None})
+                        ] if p), "charge": None, "received": None,
+                        "details": _details(
+                            ("Allotted on", _pretty_dt(b.get("allocated_at"))), ("Ward", b.get("ward")), ("Room", b.get("room_no")),
+                            ("Bed", b.get("bed_no")), ("Bed type", b.get("bed_type")),
+                            ("Price per day", _money(_rate(b)) if _rate(b) else None), ("Assigned doctor", _dr(b.get("assigned_doctor")) if b.get("assigned_doctor") else None),
+                            ("Status", (b.get("status") or "").title()))})
         if b.get("released_at"):
             d, t = _split_dt(b["released_at"])
+            days = _bed_days(b, now_dt)
             events.append({"date": d, "time": t, "type": "bed_released", "title": "Bed released", "subtitle": _bed_label(b),
-                            "charge": None, "received": None})
+                            "charge": None, "received": None,
+                            "details": _details(
+                                ("Bed", _bed_label(b)), ("Allotted on", _pretty_dt(b.get("allocated_at"))), ("Released on", _pretty_dt(b.get("released_at"))),
+                                ("Days billed", f"{days} day(s)"), ("Price per day", _money(_rate(b)) if _rate(b) else None),
+                                ("Bed charge", _money(_rate(b) * days) if _rate(b) else None))})
 
     d0, d1 = (window_start or "")[:10] or "0001-01-01", (window_end or "")[:10] or "9999-12-31"
 
@@ -625,6 +654,11 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
                     f"Triage: {stay['triage']}" if stay["triage"] else "", f"Expected stay: {stay['expected_stay']}" if stay["expected_stay"] else "",
                 ] if p),
                 "charge": None, "received": None,
+                "details": _details(
+                    ("Admission no", f"ADM-{admission_id}"), ("IP number", admission.get("ip_number")), ("Admitted on", _pretty_dt(admission.get("admission_date"))),
+                    ("Admission type", stay["admission_type"]), ("Reason for admission", stay["reason"]), ("Triage", stay["triage"]),
+                    ("Expected stay", stay["expected_stay"]), ("Department", stay["department"]), ("Consulting doctor", _dr(doctor_name) if doctor_name else None),
+                    ("Payer", (stay["payer_type"] or "").title() or None)),
             })
             # The admission-time doctor/department (a later transfer is its own event).
             orig_doctor = parse_admission_notes(admission.get("notes")).get("consulting_doctor") if moved else None
@@ -632,7 +666,9 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
             if doctor_name:
                 events.append({"date": adm_date, "time": adm_time, "type": "consultation",
                                 "title": "Doctor consultation", "subtitle": " · ".join(p for p in [f"Attending: {_dr(orig_doctor or doctor_name)}", orig_department or ""] if p),
-                                "charge": None, "received": None})
+                                "charge": None, "received": None,
+                                "details": _details(("Attending doctor", _dr(orig_doctor or doctor_name)), ("Department", orig_department),
+                                                    ("Visit type", "Inpatient admission"), ("Seen on", _pretty_dt(admission.get("admission_date"))))})
             events.extend(_ip_stay_events(cursor, patient_id, admission_id, admission, all_beds,
                                           _iso(admission.get("admission_date")), _iso(admission.get("discharge_date")) or _iso(datetime.now())))
 
@@ -718,7 +754,11 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
                 d, t = _split_dt(bed.get("released_at") or discharge_date)
                 if bed_total:
                     events.append({"date": d, "time": t, "type": "room_charges", "title": "Room & nursing charges posted",
-                                    "subtitle": f"{bed['ward']} · {bed.get('total_days') or ''} day(s)", "charge": bed_total, "received": None})
+                                    "subtitle": f"{bed['ward']} · {bed.get('total_days') or ''} day(s)", "charge": bed_total, "received": None,
+                                    "details": _details(("Ward / room / bed", _bed_label(bed)), ("Bed type", bed.get("bed_type")),
+                                                        ("From", _pretty_dt(bed.get("allocated_at"))), ("To", _pretty_dt(bed.get("released_at"))),
+                                                        ("Days billed", f"{bed.get('total_days')} day(s)" if bed.get("total_days") else None),
+                                                        ("Price per day", _money(_rate(bed)) if _rate(bed) else None), ("Total posted", _money(bed_total)))})
 
             cursor.execute(
                 "SELECT id, invoice_no, total_amount, paid_amount, due_amount, created_at FROM invoices "
@@ -741,11 +781,24 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
                     d, t = _split_dt(pay["created_at"])
                     events.append({"date": d, "time": t, "type": "payment", "title": "Final payment received",
                                     "subtitle": f"{(pay['payment_mode'] or 'cash').upper()} · Receipt PMT-{pay['id']}",
-                                    "charge": None, "received": float(pay["amount"] or 0)})
+                                    "charge": None, "received": float(pay["amount"] or 0),
+                                    "details": _details(("Receipt no", f"PMT-{pay['id']}"), ("Invoice no", discharge_invoice.get("invoice_no")),
+                                                        ("Paid on", _pretty_dt(pay["created_at"])), ("Payment mode", (pay["payment_mode"] or "cash").upper()),
+                                                        ("Reference", pay.get("gateway_ref")), ("Amount received", _money(pay["amount"])),
+                                                        ("Invoice total", _money(discharge_invoice.get("total_amount"))),
+                                                        ("Total paid", _money(discharge_invoice.get("paid_amount"))), ("Balance due", _money(discharge_invoice.get("due_amount"))))})
                 if discharge_date:
                     d, t = _split_dt(discharge_invoice.get("created_at"))
                     events.append({"date": d, "time": t, "type": "discharge", "title": "Discharged home",
-                                    "subtitle": "Discharge summary available · Bed released", "charge": None, "received": None})
+                                    "subtitle": "Discharge summary available · Bed released", "charge": None, "received": None,
+                                    "details": _details(("Discharged on", _pretty_dt((bed or {}).get("released_at")) or _pretty_dt(discharge_invoice.get("created_at")) or _pretty_dt(discharge_date)),
+                                                        ("Admitted on", _pretty_dt(admission.get("admission_date"))),
+                                                        ("Length of stay", f"{stay['days_completed']} day(s) {stay['hours_extra']} hr(s)"),
+                                                        ("Department", stay["department"]), ("Consulting doctor", _dr(doctor_name) if doctor_name else None),
+                                                        ("Bed released", _bed_label(bed) if bed else None),
+                                                        ("Final invoice", discharge_invoice.get("invoice_no")),
+                                                        ("Total billed", _money(discharge_invoice.get("total_amount"))),
+                                                        ("Total paid", _money(discharge_invoice.get("paid_amount"))), ("Balance due", _money(discharge_invoice.get("due_amount"))))})
 
             for iid in invoice_ids:
                 if discharge_invoice and iid == discharge_invoice["id"]:
@@ -767,6 +820,19 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
 
             cursor.execute("SELECT * FROM prescriptions WHERE admission_id = ? LIMIT 1", (admission_id,))
             prescription = cursor.fetchone()
+            # The emergency / essentiality certificate issued for this stay (latest one) shows in the timeline.
+            cursor.execute(
+                "SELECT id, issued_by, created_at FROM certificates WHERE admission_id = ? AND certificate_type = 'emergency_essentiality' ORDER BY id DESC LIMIT 1",
+                (admission_id,),
+            )
+            cert_row = cursor.fetchone()
+            if cert_row:
+                c_date, c_time = _split_dt(cert_row["created_at"])
+                events.append({
+                    "date": c_date, "time": c_time, "type": "certificate", "title": "Emergency & Essentiality Certificate issued",
+                    "subtitle": f"Issued by {cert_row['issued_by'] or 'staff'} · after discharge",
+                    "charge": None, "received": None, "certificate_id": cert_row["id"], "admission_id": admission_id,
+                })
             documents = [
                 {"type": "prescription", "label": "Prescription", "available": bool(prescription), "ref": prescription["id"] if prescription else None},
                 {"type": "lab_report", "label": "Lab report", "available": any(e["type"] == "report_released" and "Laboratory" in e["title"] for e in events), "ref": None},
@@ -774,6 +840,7 @@ def get_patient_journey(db, patient_id, encounter_type=None, encounter_id=None):
                 {"type": "pharmacy_slip", "label": "Pharmacy issue slip", "available": len(pharmacy_rows) > 0, "ref": None},
                 {"type": "final_bill", "label": "Final bill", "available": discharge_invoice is not None, "ref": discharge_invoice["id"] if discharge_invoice else None},
                 {"type": "discharge_summary", "label": "Discharge summary", "available": bool(discharge_date), "ref": admission_id},
+                {"type": "emergency_certificate", "label": "Emergency & Essentiality Certificate", "available": bool(discharge_date), "ref": admission_id},
             ]
 
         elif etype == "OP":
