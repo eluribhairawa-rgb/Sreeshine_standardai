@@ -12669,6 +12669,8 @@ def save_diag_results(db, order_item_id, results, username=None, is_draft=True, 
                 )
         raised = 0
         report_id = None
+        released = False
+        release_blocked = None
         if not is_draft:
             cursor.execute("UPDATE diag_order_items SET progress_status = 'results_entered' WHERE id = ?", (order_item_id,))
             report_id = latest_report["id"] if latest_report else _insert_diag_report_draft(cursor, order_item_id, "LAB", username)
@@ -12687,7 +12689,7 @@ def save_diag_results(db, order_item_id, results, username=None, is_draft=True, 
                 )
                 raised += 1
 
-            if and_release and report_id and not raised:
+            if and_release and report_id:
                 cursor.execute("SELECT * FROM diag_reports WHERE id = ?", (report_id,))
                 rep = cursor.fetchone()
                 if rep and rep["status"] in ("draft", "returned_for_correction"):
@@ -12704,10 +12706,13 @@ def save_diag_results(db, order_item_id, results, username=None, is_draft=True, 
                         _snapshot_lab_results(cursor, rep)
                         cursor.execute("UPDATE diag_reports SET status = ?, released_at = CURRENT_TIMESTAMP WHERE id = ?", (_release_status(rep), report_id))
                         cursor.execute("UPDATE diag_order_items SET progress_status = 'released' WHERE id = ?", (order_item_id,))
-                    except ValueError:
-                        pass
+                        released = True
+                    except ValueError as exc:
+                        # Four-eyes rule: the person who entered the results cannot also authorize them.
+                        release_blocked = str(exc)
         conn.commit()
-        return {"critical_alerts_raised": raised, "critical_values": len(critical_hits), "report_id": report_id}
+        return {"critical_alerts_raised": raised, "critical_values": len(critical_hits), "report_id": report_id,
+                "released": released, "release_blocked_reason": release_blocked}
 
 
 
@@ -13205,9 +13210,8 @@ def authorize_diag_report(db, report_id, username, also_release=False):
         report = cursor.fetchone()
         if not report or report["status"] != "pending_review":
             raise ValueError("Only a report pending review can be authorized.")
-        cursor.execute("SELECT COUNT(*) AS c FROM diag_critical_alerts WHERE order_item_id = ? AND resolved_at IS NULL", (report["order_item_id"],))
-        if cursor.fetchone()["c"] > 0:
-            raise ValueError("This result has an unresolved critical value alert. Record who was contacted and resolve the alert (Reports > Critical Alerts) before authorizing this report.")
+        # An open critical value alert does not hold the report back: it is released now and the alert stays open
+        # (Reports > Critical Alerts) until the clinician notification is recorded.
         if report["report_type"] == "LAB":
             _check_four_eyes(cursor, report, username)
         cursor.execute(
@@ -13233,9 +13237,6 @@ def release_diag_report(db, report_id, username=None):
         report = cursor.fetchone()
         if not report or report["status"] != "authorized":
             raise ValueError("Only an authorized report can be released.")
-        cursor.execute("SELECT COUNT(*) AS c FROM diag_critical_alerts WHERE order_item_id = ? AND resolved_at IS NULL", (report["order_item_id"],))
-        if cursor.fetchone()["c"] > 0:
-            raise ValueError("This result has an unresolved critical value alert. Record who was contacted and resolve the alert (Reports > Critical Alerts) before releasing this report.")
         cursor.execute("UPDATE diag_reports SET status = ?, released_at = CURRENT_TIMESTAMP WHERE id = ?", (_release_status(report), report_id))
         cursor.execute("UPDATE diag_order_items SET progress_status = 'released' WHERE id = ?", (report["order_item_id"],))
         conn.commit()

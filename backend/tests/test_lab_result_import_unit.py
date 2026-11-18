@@ -49,11 +49,18 @@ class LongLayoutTests(unittest.TestCase):
         self.assertTrue(any("Skipped 3 line" in w for w in out["warnings"]))
         self.assertEqual(out["identity_warnings"], [])
 
-    def test_semicolon_and_patient_column_identity_warning(self):
+    def test_report_for_another_patient_is_rejected_not_filled(self):
         csv_bytes = b"Patient Name;Test Name;Value\nSita Devi;Haemoglobin;9.1\n"
+        with self.assertRaises(fi.FileImportError) as ctx:
+            lri.import_lab_results("r.csv", csv_bytes, CBC, patient_name="Ravi Kumar")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("NOT filled", ctx.exception.message)
+
+    def test_matching_patient_name_is_filled(self):
+        csv_bytes = b"Patient Name;Test Name;Value\nRavi Kumar;Haemoglobin;9.1\n"
         out = lri.import_lab_results("r.csv", csv_bytes, CBC, patient_name="Ravi Kumar")
         self.assertEqual(values(out), {1: "9.1"})
-        self.assertEqual(len(out["identity_warnings"]), 1)
+        self.assertEqual(out["identity_warnings"], [])
 
     def test_duplicate_parameter_keeps_first_and_warns(self):
         out = lri.import_lab_results("r.csv", b"Test,Result\nHb,13\nHGB,14\n", CBC)

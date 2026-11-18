@@ -119,6 +119,8 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
   const [ocrFilledIds, setOcrFilledIds] = useState<Set<number>>(new Set());
   // What the last results upload detected (file type, column mapping, preview) -- shown under the upload box.
   const [lastImport, setLastImport] = useState<ResultImport | null>(null);
+  // After a report upload only the parameters the report has a value for are listed (null = list all, e.g. manual entry).
+  const [shownParamIds, setShownParamIds] = useState<Set<number> | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -161,6 +163,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
     setOcrFileName("");
     setOcrFilledIds(new Set());
     setLastImport(null);
+    setShownParamIds(null);
     try {
       const d = await apiFetch<ItemDetail>(`/api/diag/lab/items/${row.id}`);
       setDetail(d);
@@ -282,7 +285,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
     }
     if (!isDraft) {
       // Parameters added automatically from an uploaded report are optional: other orders of this test never had them.
-      const missing = detail.parameters.filter((p) => !p.auto_created && !(resultValues[p.id] || "").trim());
+      const missing = detail.parameters.filter((p) => !p.auto_created && (!shownParamIds || shownParamIds.has(p.id)) && !(resultValues[p.id] || "").trim());
       if (missing.length) {
         setNotice({ type: "warning", message: `Enter a value for every parameter before finalizing. Missing: ${missing.map((p) => p.name).join(", ")}.` });
         return;
@@ -302,15 +305,20 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
     setSaving(true);
     try {
       // Finalizing also creates the report draft on the server, so the test moves straight to Reports & Approval.
-      const res = await apiFetch<{ critical_alerts_raised: number; critical_values: number }>(
+      const res = await apiFetch<{ critical_alerts_raised: number; critical_values: number; released?: boolean; release_blocked_reason?: string | null }>(
         `/api/diag/lab/items/${detail.id}/results`,
         { method: "POST", body: JSON.stringify({ results, is_draft: isDraft, and_release: andRelease }) }
       );
+      const releaseBlocked = !isDraft && andRelease && !res.released;
       setNotice({
-        type: !isDraft && res.critical_values ? "warning" : "success",
+        type: !isDraft && (res.critical_values || releaseBlocked) ? "warning" : "success",
         message: isDraft
           ? "Results saved as draft."
-          : andRelease && !res.critical_values
+          : releaseBlocked
+            ? `Results finalized and sent to Reports & Approval, but NOT released yet. ${res.release_blocked_reason || "It needs approval first."}`
+          : andRelease && res.critical_values
+            ? "Report released. A critical value was flagged: notify the clinician now and record it in Reports > Critical Alerts (the alert stays open until you do)."
+          : andRelease
             ? "Results finalized and report released immediately."
             : res.critical_alerts_raised
               ? `Results finalized. ${res.critical_alerts_raised} critical value(s) flagged -- notify the clinician now.`
@@ -373,6 +381,13 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
         setResultValues((prev) => ({ ...prev, ...Object.fromEntries(filled.map((v) => [v.parameter_id, v.value])) }));
       }
       setOcrFilledIds(new Set(filled.map((v) => v.parameter_id)));
+      if (!resultsLocked && filled.length) {
+        // Keep rows that already hold a value (earlier draft or typed) plus everything the report filled.
+        const keep = new Set<number>(filled.map((v) => v.parameter_id));
+        Object.entries(resultValues).forEach(([id, val]) => { if (String(val || "").trim()) keep.add(Number(id)); });
+        detail.results.forEach((r) => keep.add(r.parameter_id));
+        setShownParamIds(keep);
+      }
       let equipmentNote = "";
       if (equipment && !selectedEquipment) {
         const name = equipment.toLowerCase();
@@ -633,10 +648,16 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
                       {unavailableEquipment.name} cannot be used for results ({unavailableEquipment.reason}). Fix it in Quality &amp; Equipment or select another analyzer.
                     </div>
                   )}
+                  {shownParamIds && detail.parameters.length > shownParamIds.size && (
+                    <p className="muted" style={{ margin: "0 0 0.5rem" }}>
+                      {detail.parameters.length - detail.parameters.filter((p) => shownParamIds.has(p.id)).length} parameter(s) with no value in the report are hidden.{" "}
+                      <button type="button" className="hosp-view-all" onClick={() => setShownParamIds(null)}>Show all parameters</button>
+                    </p>
+                  )}
                   <table className="diag-data-table">
                     <thead><tr><th>Parameter</th><th>Value</th><th>Unit</th><th>Reference range</th><th>Flag</th></tr></thead>
                     <tbody>
-                      {detail.parameters.map((p) => {
+                      {detail.parameters.filter((p) => !shownParamIds || shownParamIds.has(p.id)).map((p) => {
                         const existing = detail.results.find((r) => r.parameter_id === p.id);
                         const flag = computeFlag(p, resultValues[p.id]) ?? (p.data_type === "numeric" ? null : existing?.flag);
                         return (

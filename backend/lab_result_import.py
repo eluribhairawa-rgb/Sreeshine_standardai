@@ -464,4 +464,9 @@ def import_lab_results(filename, content, parameters, service_name="", patient_n
     if not result["values"] and not result["skipped"] and not result["new_parameters"] and file_type != "csv":
         raise fi.FileImportError(422, "No results for this test could be read from the file. Try a clearer, uncropped image.")
     result["identity_warnings"] = qwen_ocr.lab_identity_warnings(result, patient_name, specimen_nos)
+    if result["identity_warnings"]:
+        # The report belongs to someone else: nothing is filled and no catalogue parameters are created from it.
+        raise fi.FileImportError(
+            409, "Report does not match this patient, so the results were NOT filled. " + " ".join(result["identity_warnings"])
+            + " Upload the correct report for this patient.")
     return {"file_type": file_type, "file_name": filename or "", **result}
