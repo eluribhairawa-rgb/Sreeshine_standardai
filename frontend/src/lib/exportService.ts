@@ -280,13 +280,15 @@ function drawPdfWatermark(pdf: jsPDF, page: number): void {
 
 /** Same footer as the backend PDFs (export_utils.py): rule - logo - rule,
  * "Thank you for choosing HospAI." and "Page X of Y", at the bottom of every page. */
-function drawPdfFooter(pdf: jsPDF): void {
+export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: boolean } = {}): void {
+  // Page units per millimetre for THIS document (points for the backend-style PDFs, millimetres for page captures).
+  const MM = 72 / 25.4 / pdf.internal.scaleFactor;
   const total = pdf.getNumberOfPages();
   const pageHeightMm = pdf.internal.pageSize.getHeight() / MM;
   const lineY = (pageHeightMm - 16.8) * MM;
   for (let page = 1; page <= total; page += 1) {
     pdf.setPage(page);
-    drawPdfWatermark(pdf, page);
+    if (watermark) drawPdfWatermark(pdf, page);
     pdf.setDrawColor(0, 0, 0);
     pdf.setLineWidth(0.45 * MM);
     pdf.line(15 * MM, lineY, 99 * MM, lineY);

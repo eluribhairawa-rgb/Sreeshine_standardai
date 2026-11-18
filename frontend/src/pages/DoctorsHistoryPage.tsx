@@ -174,7 +174,8 @@ export default function DoctorsHistoryPage({ setNotice, onOpenPatient, scopedDoc
   // Pagination calculation
   const totalPages = Math.max(1, Math.ceil(consultations.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
-  const pagedRecords = consultations.slice((safePage - 1) * pageSize, safePage * pageSize);
+  // No page buttons: every record is listed inside a scrolling box.
+  const pagedRecords = consultations;
 
   const getStatusBadgeClass = (status: string) => {
     const s = (status || "").toLowerCase();
@@ -313,6 +314,7 @@ export default function DoctorsHistoryPage({ setNotice, onOpenPatient, scopedDoc
           {loading ? (
             <p className="muted loading-text">Loading consultation history...</p>
           ) : (
+            <div className="doctors-history-scroll">
             <Table className="module-table module-table-doctors-history" aria-label="Doctors history table">
               <TableHead>
                 <TableCell>Date & Time</TableCell>
@@ -366,42 +368,11 @@ export default function DoctorsHistoryPage({ setNotice, onOpenPatient, scopedDoc
                 </TableRow>
               )}
             </Table>
+            </div>
           )}
 
           <div className="queue-pagination doctors-history-pagination">
-            <span>
-              Showing {consultations.length ? (safePage - 1) * pageSize + 1 : 0} to{" "}
-              {Math.min(safePage * pageSize, consultations.length)} of {consultations.length} entries
-            </span>
-            <div>
-              <button
-                type="button"
-                disabled={safePage === 1 || loading}
-                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-              >
-                ‹
-              </button>
-              {Array.from({ length: totalPages }, (_, index) => index + 1)
-                .slice(0, 5)
-                .map((page) => (
-                  <button
-                    key={page}
-                    type="button"
-                    className={safePage === page ? "active" : ""}
-                    disabled={loading}
-                    onClick={() => setCurrentPage(page)}
-                  >
-                    {page}
-                  </button>
-                ))}
-              <button
-                type="button"
-                disabled={safePage === totalPages || loading}
-                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-              >
-                ›
-              </button>
-            </div>
+            <span>{consultations.length} {consultations.length === 1 ? "entry" : "entries"} · scroll to see all</span>
           </div>
         </CardContent>
       </Card>

@@ -11767,7 +11767,7 @@ body {
 }
 
 .rx-sheet-meds-box {
-  flex: 1;
+  flex: 0 0 auto; /* wraps the medicine rows tightly */
   margin: 6px 0 14px;
   border: 1.5px solid #102a43;
 }
@@ -11834,7 +11834,8 @@ body {
     background: #fff !important;
   }
   .rx-sheet-meds-box {
-    flex: 1 !important;
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
   }
   .rx-sheet-signature-block {
     margin-top: auto !important;
@@ -14821,3 +14822,18 @@ label,
 .optv-marquee-half em{font-style:normal;margin-left:6vw;color:#14b8a6}
 @keyframes optv-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
 @media (prefers-reduced-motion: reduce){.optv-marquee-track{animation-duration:90s}}
+
+
+/* Doctor's History: the consultation list scrolls inside a fixed-height box (no page buttons). */
+.doctors-history-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.doctors-history-scroll .table-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #eef6fb;
+}

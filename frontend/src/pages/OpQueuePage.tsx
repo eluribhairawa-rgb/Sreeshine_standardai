@@ -1125,7 +1125,7 @@ export default function OpQueuePage({ setNotice, onOpenPatient, scopedDoctor }: 
                     <span className="opq-details-vital-lbl">Pulse</span>
                   </div>
                   <div className="opq-details-vital-tile">
-                    <span className="opq-details-vital-val">{patientProfile?.temperature ? `${patientProfile.temperature} °C` : "—"}</span>
+                    <span className="opq-details-vital-val">{patientProfile?.temperature ? `${patientProfile.temperature} °F` : "—"}</span>
                     <span className="opq-details-vital-lbl">Temp</span>
                   </div>
                   <div className="opq-details-vital-tile">

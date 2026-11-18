@@ -982,7 +982,7 @@ export default function LabPage({ setNotice, user }: Props) {
             </div>
             
             <div class="operator">
-              <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI System")}</p>
+              <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI")}</p>
               <p style="margin: 0; font-weight: bold; letter-spacing: 2px;">........................................</p>
             </div>
             
@@ -1256,7 +1256,7 @@ export default function LabPage({ setNotice, user }: Props) {
           </div>
           
           <div class="operator">
-            <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI System")}</p>
+            <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI")}</p>
             <p style="margin: 0; font-weight: bold; letter-spacing: 2px;">........................................</p>
           </div>
           
@@ -1519,7 +1519,7 @@ export default function LabPage({ setNotice, user }: Props) {
             </div>
             
             <div class="operator">
-              <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI System")}</p>
+              <p style="margin: 0 0 10mm 0;">Operator: ${safeText(user?.full_name || user?.username || "HospAI")}</p>
               <p style="margin: 0; font-weight: bold; letter-spacing: 2px;">........................................</p>
             </div>
             

@@ -1,7 +1,7 @@
 // Orders & Billing: one order screen for all four service types (In-house, External,
 // Outsourcing, Home Visit). Patient Details changes per type; Select Services and the
 // Order summary (bill, discount, remarks, Save Draft / Generate Invoice) are shared.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { FiClock, FiTrash2 } from "react-icons/fi";
 import { Button, Input, Label, Modal, Select, Textarea } from "../components/ui";
@@ -56,6 +56,31 @@ function ageOf(p: Patient): string {
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const toLocalInput = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+
+// Short names doctors write on a prescription -> words of the catalogue test name.
+const TEST_ALIASES: Record<string, string> = {
+  cbp: "complete blood count", cbc: "complete blood count", hb: "haemoglobin", hgb: "haemoglobin",
+  lft: "liver function", rft: "renal function", kft: "kidney function", tft: "thyroid",
+  fbs: "fasting blood sugar", ppbs: "post prandial", rbs: "random blood sugar", hba1c: "hba1c",
+  ua: "urine", "urine r/m": "urine routine", cue: "urine routine", "x ray": "x-ray", xray: "x-ray",
+};
+const normTest = (v: string) => v.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+
+/** Matches the tests written on an e-prescription ("cbp, lipid profile") to catalogue services. */
+function matchAdvisedTests(advised: string, services: DiagService[]): { matched: DiagService[]; missing: string[] } {
+  const matched: DiagService[] = [];
+  const missing: string[] = [];
+  advised.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).forEach((raw) => {
+    const key = normTest(raw);
+    const wanted = normTest(TEST_ALIASES[key] || TEST_ALIASES[raw.toLowerCase()] || raw);
+    const hit =
+      services.find((s) => normTest(s.name) === wanted || normTest(s.code) === key) ||
+      services.find((s) => normTest(s.name).includes(wanted) || (wanted.length > 3 && wanted.includes(normTest(s.name))));
+    if (hit) { if (!matched.some((m) => m.id === hit.id)) matched.push(hit); } else missing.push(raw);
+  });
+  return { matched, missing };
+}
 
 export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved, onViewHistory }: Props) {
   const labOnly = serviceType === "OUTSOURCING" || serviceType === "HOME_VISIT";
@@ -184,6 +209,44 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
     : [...prev, { service_id: s.id, code: s.code, name: s.name, department: s.department, service_type: s.service_type, rate: s.rate }]));
   const remove = (id: number) => setLines((prev) => prev.filter((l) => l.service_id !== id));
   const toggle = (s: DiagService) => (selected.has(s.id) ? remove(s.id) : add(s));
+
+  // ---- e-prescription: tests the doctor advised are added to the order summary ----
+  const advisedLoadedFor = useRef("");
+  const loadEPrescription = useCallback(async (p: Patient, announce: boolean) => {
+    try {
+      const res = await apiFetch<{ prescriptions?: { id: number; prescription_no?: string; lab_tests?: string; created_at?: string }[] }>(
+        `/api/prescriptions?patient_id=${encodeURIComponent(p.patient_id)}`);
+      const list = (res.prescriptions || []).filter((r) => (r.lab_tests || "").trim());
+      const latest = list.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || b.id - a.id)[0];
+      if (!latest) {
+        if (announce) setNotice({ type: "info", message: "No tests are advised on this patient's e-prescription." });
+        return;
+      }
+      const { matched, missing } = matchAdvisedTests(latest.lab_tests || "", services);
+      if (matched.length) {
+        setLines((prev) => {
+          const have = new Set(prev.map((l) => l.service_id));
+          return [...prev, ...matched.filter((m) => !have.has(m.id)).map((m) => ({ service_id: m.id, code: m.code, name: m.name, department: m.department, service_type: m.service_type, rate: m.rate }))];
+        });
+      }
+      setNotice({
+        type: matched.length ? "success" : "warning",
+        message: matched.length
+          ? `Loaded ${matched.length} test(s) from the e-prescription${latest.prescription_no ? ` (${latest.prescription_no})` : ""}: ${matched.map((m) => m.name).join(", ")}.${missing.length ? ` Not in the catalogue, add manually: ${missing.join(", ")}.` : ""}`
+          : `The e-prescription advises "${latest.lab_tests}" but no matching test was found in the catalogue. Add it manually.`,
+      });
+    } catch (err) {
+      if (announce) reportError(setNotice, err as { message?: string; status?: number }, "Could not load the e-prescription.");
+    }
+  }, [services, setNotice]);
+
+  // Searching an in-house patient loads the advised tests once, as soon as the catalogue is available.
+  useEffect(() => {
+    if (serviceType !== "IN_HOUSE" || !patient || services.length === 0) return;
+    if (advisedLoadedFor.current === patient.patient_id) return;
+    advisedLoadedFor.current = patient.patient_id;
+    void loadEPrescription(patient, false);
+  }, [serviceType, patient, services.length, loadEPrescription]);
   const allShownSelected = shown.length > 0 && shown.every((s) => selected.has(s.id));
   const toggleAllShown = () => (allShownSelected ? shown.forEach((s) => remove(s.id)) : shown.forEach(add));
   const patchLine = (id: number, patch: Partial<Line>) => setLines((prev) => prev.map((l) => (l.service_id === id ? { ...l, ...patch } : l)));
@@ -321,6 +384,7 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
             </div>
           )}
           {mode === "registered" ? (
+            <>
             <div className="lab-ob-patient-row">
               <div className="lab-ob-search"><Label>Search Patient (UHID)</Label>
                 <PatientSearchPicker placeholder="Enter UHID or Patient Name" onSelect={(p) => void selectPatient(p)} />
@@ -329,6 +393,12 @@ export default function LabOrderWorkspace({ serviceType, setNotice, onOrderSaved
               <div><Label>UHID</Label><Input value={patient?.patient_id || ""} readOnly placeholder="-" /></div>
               <div><Label>Age / Gender</Label><Input value={patient ? [ageOf(patient), patient.gender].filter(Boolean).join(" / ") : ""} readOnly placeholder="-" /></div>
             </div>
+            {serviceType === "IN_HOUSE" && patient && (
+              <div style={{ marginTop: "0.5rem" }}>
+                <Button type="button" variant="secondary" size="sm" onClick={() => void loadEPrescription(patient, true)}>📄 Load e-Prescription tests</Button>
+              </div>
+            )}
+            </>
           ) : (
             <div className="lab-ob-patient-row">
               <div><Label>Patient Name *</Label><Input value={walkin.name} onChange={(e) => setWalkin({ ...walkin, name: e.target.value })} /></div>

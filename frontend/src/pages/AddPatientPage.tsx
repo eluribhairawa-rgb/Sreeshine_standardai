@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { brandTitle, escapeBrandText } from "../lib/branding";
 import type { Dispatch, SetStateAction } from "react";
 import type { Notice, Patient, PatientForm } from "../types";
@@ -235,6 +235,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
   const [emergencyAttendant, setEmergencyAttendant] = useState("");
   const [emergencyComplaint, setEmergencyComplaint] = useState("");
   const [symptoms, setSymptoms] = useState("");
+  // The vitals / complaint entered at registration, kept for the printed prescription after the form is cleared.
+  const intakeRef = useRef({ patientId: "", bp: "", pulse: "", temp: "", weight: "", spo2: "", complaint: "" });
   const [vitalsBp, setVitalsBp] = useState("");
   const [vitalsPulse, setVitalsPulse] = useState("");
   const [vitalsTemp, setVitalsTemp] = useState("");
@@ -603,6 +605,11 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
         }
       }
 
+      intakeRef.current = {
+        patientId: createdPatientId, bp: (visitType === "Emergency" ? emergencyBp : vitalsBp).trim(), pulse: (visitType === "Emergency" ? emergencyPulse : vitalsPulse).trim(),
+        temp: (visitType === "Emergency" ? emergencyTemp : vitalsTemp).trim(), weight: vitalsWeight.trim(), spo2: (visitType === "Emergency" ? emergencySpo2 : vitalsSpo2).trim(),
+        complaint: (visitType === "Emergency" ? emergencyComplaint : symptoms).trim(),
+      };
       const regSummary = {
         patientId: createdPatientId,
         name: fullName,
@@ -1022,6 +1029,8 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
     const dateText = when.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" });
     const timeText = when.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true });
     const ageGender = [appt.age ? `${appt.age} Y` : "", appt.gender].filter(Boolean).join(" / ");
+    // Only the intake of this very patient is printed (a returning patient has none from this session).
+    const intake = intakeRef.current.patientId === appt.patientId ? intakeRef.current : { bp: "", pulse: "", temp: "", weight: "", spo2: "", complaint: "" };
     const row = (label: string, value: string) =>
       `<div class="rx-f"><span class="rx-l">${label}</span><span class="rx-v">${value}</span></div>`;
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Prescription - ${esc(appt.patientName)}</title>
@@ -1057,17 +1066,17 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
       <div class="rx-section">
         <div class="rx-section-title">Vitals</div>
         <div class="rx-section-body">
-          <div class="rx-vital"><span class="rx-vital-l">BP</span><span class="rx-vital-v">_____ mmHg</span></div>
-          <div class="rx-vital"><span class="rx-vital-l">Pulse</span><span class="rx-vital-v">_____ bpm</span></div>
-          <div class="rx-vital"><span class="rx-vital-l">Temp</span><span class="rx-vital-v">_____ °F</span></div>
-          <div class="rx-vital"><span class="rx-vital-l">Weight</span><span class="rx-vital-v">_____ kg</span></div>
-          <div class="rx-vital"><span class="rx-vital-l">SpO₂</span><span class="rx-vital-v">_____ %</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">BP</span><span class="rx-vital-v">${intake.bp ? `${esc(intake.bp)} mmHg` : "_____ mmHg"}</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Pulse</span><span class="rx-vital-v">${intake.pulse ? `${esc(intake.pulse)} bpm` : "_____ bpm"}</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Temp</span><span class="rx-vital-v">${intake.temp ? `${esc(intake.temp)} °F` : "_____ °F"}</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">Weight</span><span class="rx-vital-v">${intake.weight ? `${esc(intake.weight)} kg` : "_____ kg"}</span></div>
+          <div class="rx-vital"><span class="rx-vital-l">SpO₂</span><span class="rx-vital-v">${intake.spo2 ? `${esc(intake.spo2)} %` : "_____ %"}</span></div>
         </div>
       </div>
 
       <div class="rx-section">
         <div class="rx-section-title">Diagnosis / Chief Complaint</div>
-        <div class="rx-diag">______________________________________________</div>
+        <div class="rx-diag">${intake.complaint ? esc(intake.complaint) : "______________________________________________"}</div>
       </div>
 
       <div class="rx-space"></div>
@@ -2141,7 +2150,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
             {[
               { label: "BP", value: vitalsBp, set: (v: string) => setVitalsBp(v.replace(/[^0-9/]/g, "").slice(0, 7)), placeholder: "120/80" },
               { label: "Pulse (bpm)", value: vitalsPulse, set: (v: string) => setVitalsPulse(v.replace(/\D/g, "").slice(0, 3)), placeholder: "72" },
-              { label: "Temp (°C)", value: vitalsTemp, set: (v: string) => setVitalsTemp(v.replace(/[^0-9.]/g, "").slice(0, 5)), placeholder: "37.0" },
+              { label: "Temp (°F)", value: vitalsTemp, set: (v: string) => setVitalsTemp(v.replace(/[^0-9.]/g, "").slice(0, 5)), placeholder: "98.6" },
               { label: "SpO2 (%)", value: vitalsSpo2, set: (v: string) => setVitalsSpo2(v.replace(/\D/g, "").slice(0, 3)), placeholder: "98" },
               { label: "Resp. Rate", value: vitalsRespRate, set: (v: string) => setVitalsRespRate(v.replace(/\D/g, "").slice(0, 3)), placeholder: "/min" },
               { label: "Height (cm)", value: vitalsHeight, set: (v: string) => setVitalsHeight(v.replace(/[^0-9.]/g, "").slice(0, 5)), placeholder: "170" },
@@ -2905,7 +2914,7 @@ export default function AddPatientPage({ setNotice, onNavigate, onCreate }: Prop
               {[
                 { label: "BP", value: emergencyBp, set: (v: string) => setEmergencyBp(v.replace(/[^0-9/]/g, "").slice(0, 7)), placeholder: "120/80" },
                 { label: "Pulse", value: emergencyPulse, set: (v: string) => setEmergencyPulse(v.replace(/\D/g, "").slice(0, 3)), placeholder: "bpm" },
-                { label: "Temp (°C)", value: emergencyTemp, set: (v: string) => setEmergencyTemp(v.replace(/[^0-9.]/g, "").slice(0, 5)), placeholder: "37.0" },
+                { label: "Temp (°F)", value: emergencyTemp, set: (v: string) => setEmergencyTemp(v.replace(/[^0-9.]/g, "").slice(0, 5)), placeholder: "98.6" },
                 { label: "SpO2 (%)", value: emergencySpo2, set: (v: string) => setEmergencySpo2(v.replace(/\D/g, "").slice(0, 3)), placeholder: "98" },
                 { label: "Resp. Rate", value: emergencyRespRate, set: (v: string) => setEmergencyRespRate(v.replace(/\D/g, "").slice(0, 3)), placeholder: "/min" },
                 { label: "Pain (0-10)", value: emergencyPainScore, set: (v: string) => setEmergencyPainScore(clampPainScore(v)), placeholder: "0-10" },

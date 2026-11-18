@@ -99,6 +99,8 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
   const [selected, setSelected] = useState<WorklistRow | null>(null);
   const [detail, setDetail] = useState<ItemDetail | null>(null);
   const [stageCounts, setStageCounts] = useState<Record<string, number>>({});
+  // Orders placed on this day only; empty = every date.
+  const [filterDate, setFilterDate] = useState("");
 
   const [collectForm, setCollectForm] = useState(EMPTY_COLLECT_FORM);
   const [receiveForm, setReceiveForm] = useState(EMPTY_RECEIVE_FORM);
@@ -125,7 +127,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
   const load = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ stage, ...(search.trim() ? { q: search.trim() } : {}) });
+      const params = new URLSearchParams({ stage, ...(search.trim() ? { q: search.trim() } : {}), ...(filterDate ? { date: filterDate } : {}) });
       const data = await apiFetch<{ items: WorklistRow[] }>(`/api/diag/lab/worklist?${params}`);
       setRows(data.items || []);
     } catch (err: any) {
@@ -137,14 +139,14 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
 
   const loadStageCounts = async () => {
     try {
-      const results = await Promise.all(STAGES.map((s) => apiFetch<{ items: WorklistRow[] }>(`/api/diag/lab/worklist?stage=${s.key}`)));
+      const results = await Promise.all(STAGES.map((s) => apiFetch<{ items: WorklistRow[] }>(`/api/diag/lab/worklist?stage=${s.key}${filterDate ? `&date=${filterDate}` : ""}`)));
       const next: Record<string, number> = {};
       STAGES.forEach((s, idx) => { next[s.key] = (results[idx].items || []).length; });
       setStageCounts(next);
     } catch { /* KPI counts are supplementary; worklist itself still loads independently */ }
   };
 
-  useEffect(() => { void load(); void loadStageCounts(); }, [stage]);
+  useEffect(() => { void load(); void loadStageCounts(); }, [stage, filterDate]);
   useEffect(() => { const t = window.setTimeout(() => void load(), 300); return () => window.clearTimeout(t); }, [search]);
   useEffect(() => { apiFetch<{ vendors: Vendor[] }>("/api/lab/vendors-list").then((d) => setVendors(d.vendors || [])).catch(() => {}); }, []);
   useEffect(() => { apiFetch<{ equipment: Equipment[] }>("/api/diag/equipment").then((d) => setEquipmentList(d.equipment || [])).catch(() => {}); }, []);

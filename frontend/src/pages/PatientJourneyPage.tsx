@@ -3,7 +3,11 @@ import type { Dispatch, SetStateAction } from "react";
 import { apiFetch, reportError } from "../lib/api";
 import { formatPhone, splitStoredPhone, toWhatsAppNumber } from "../lib/phone";
 import { generatePDFBlob, downloadPDF, printPDF, patientFilename } from "../lib/exportService";
-import { sharePdfFile } from "../lib/whatsappPdfShare";
+import { sharePdfFile, htmlToPdfBlob } from "../lib/whatsappPdfShare";
+import { buildReportPrintHtml } from "../lib/diagReports";
+import type { ReportDetail } from "../lib/diagReports";
+import { escapeBrandText } from "../lib/branding";
+import { printViaIframe } from "../lib/printViaIframe";
 import type { StandardPdfPayload } from "../lib/exportService";
 import { Button, Modal } from "../components/ui";
 import EmergencyCertificateModal from "../components/EmergencyCertificateModal";
@@ -113,7 +117,9 @@ type Journey = {
 
 function formatCurrency(amount?: number | null) {
   if (amount === null || amount === undefined) return "—";
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(amount);
+  // Whole rupees stay whole (₹1,000); anything with paise keeps both decimals (₹6.72), never rounded to ₹7.
+  const hasPaise = Math.abs(amount - Math.round(amount)) > 0.004;
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: hasPaise ? 2 : 0, maximumFractionDigits: 2 }).format(amount);
 }
 
 function formatDateHeading(iso: string) {
@@ -181,6 +187,8 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
   const [payMode, setPayMode] = useState("");
   const [paying, setPaying] = useState(false);
   const [exporting, setExporting] = useState<"" | "pdf" | "print" | "whatsapp">("");
+  // The actual document (PDF) shown for lab reports, prescriptions and bills, with print / download.
+  const [pdfPreview, setPdfPreview] = useState<{ title: string; loading: boolean; url: string | null; blob: Blob | null; filename: string; html: string } | null>(null);
   // Emergency / essentiality certificate of an admission (opens the same window used at discharge).
   const [certificateAdmission, setCertificateAdmission] = useState<number | null>(null);
   const [reportModal, setReportModal] = useState<{ title: string; loading: boolean; content: Record<string, unknown> | null } | null>(null);
@@ -317,14 +325,37 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
     });
   };
 
-  const openReport = async (reportId: number, title: string) => {
-    setReportModal({ title, loading: true, content: null });
+  const closePdfPreview = () => {
+    setPdfPreview((prev) => { if (prev?.url) URL.revokeObjectURL(prev.url); return null; });
+  };
+
+  /** Renders an official document (letterhead + body) to PDF and shows it in the preview window. */
+  const openPdfPreview = async (title: string, html: string, filename: string) => {
+    setPdfPreview({ title, loading: true, url: null, blob: null, filename, html });
     try {
-      const data = await apiFetch<{ content: Record<string, unknown> | string; status: string; authorized_by?: string; released_at?: string }>(`/api/diag/reports/${reportId}`);
-      const content = typeof data.content === "string" ? { text: data.content } : (data.content || {});
-      setReportModal({ title, loading: false, content: { ...content, "Authorized by": data.authorized_by, "Released at": data.released_at, "Status": data.status } });
+      const blob = await htmlToPdfBlob(html);
+      setPdfPreview({ title, loading: false, url: URL.createObjectURL(blob), blob, filename, html });
     } catch (error) {
-      setReportModal(null);
+      setPdfPreview(null);
+      reportError(setNotice, error as { message?: string; status?: number }, "Unable to prepare the document PDF.");
+    }
+  };
+
+  const docTable = (columns: string[], rows: string[][]) =>
+    `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;font-size:12px;"><thead><tr>${columns.map((c) => `<th style="background:#f1f5f9;text-align:left;">${escapeBrandText(c)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${escapeBrandText(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+
+  const docShell = (title: string, body: string) =>
+    `<html><head><title>${escapeBrandText(title)}</title></head><body style="font-family:Arial,sans-serif;padding:8px 4px;">
+      <p style="margin:0 0 10px;font-size:12px;color:#334155;"><strong>${escapeBrandText(journey?.patient?.name || "")}</strong> · ${escapeBrandText(journey?.patient?.patient_id || "")}</p>${body}</body></html>`;
+
+  const openReport = async (reportId: number, title: string) => {
+    setPdfPreview({ title, loading: true, url: null, blob: null, filename: "", html: "" });
+    try {
+      const data = await apiFetch<ReportDetail>(`/api/diag/reports/${reportId}`);
+      const html = buildReportPrintHtml(data, (typeof data.content === "string" ? { summary: data.content } : data.content) || {});
+      await openPdfPreview(title, html, patientFilename(journey?.patient?.name, journey?.patient?.patient_id, `Report_${reportId}`));
+    } catch (error) {
+      setPdfPreview(null);
       reportError(setNotice, error as { message?: string; status?: number }, "Unable to load report.");
     }
   };
@@ -447,7 +478,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
       title: "Patient Journey Summary",
       subtitle: `${journey.selected.label} · ${journey.selected.start?.slice(0, 10) || ""}${journey.selected.end && journey.selected.end !== journey.selected.start ? ` – ${journey.selected.end.slice(0, 10)}` : ""}`,
       filename: patientFilename(journey.patient.name, journey.patient.patient_id),
-      operator_name: "HospAI System",
+      operator_name: "HospAI",
       patient_info: {
         patient_name: journey.patient.name, patient_id: journey.patient.patient_id,
         age: journey.patient.age ?? undefined, gender: journey.patient.gender ?? undefined,
@@ -996,10 +1027,17 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                             const evt = journey.events.find((e) => e.title.includes(d.type === "lab_report" ? "Laboratory report" : "Imaging report"));
                             if (evt?.report_id) void openReport(evt.report_id, d.label);
                           } else if (d.type === "pharmacy_slip") {
-                            const evt = journey.events.find((e) => e.type === "pharmacy_issued" && e.items && e.items.length > 0);
-                            setReportModal({ title: "Pharmacy issue slip", loading: false, content: { "Medicines": evt?.items?.map((it) => `${it.name} × ${it.quantity} = ${formatCurrency(it.amount)}`).join("; ") || "-" } });
+                            const items = journey.events.filter((e) => e.type === "pharmacy_issued").flatMap((e) => e.items || []);
+                            const total = items.reduce((sum, it) => sum + (it.amount || 0), 0);
+                            void openPdfPreview("Pharmacy issue slip", docShell("Pharmacy issue slip", `<h3 style="margin:0 0 8px;">Pharmacy issue slip</h3>${
+                              docTable(["Medicine", "Qty", "Unit price", "Amount"], items.map((it) => [it.name, String(it.quantity), formatCurrency(it.unit_price), formatCurrency(it.amount)]))
+                            }<p style="text-align:right;font-weight:700;margin-top:10px;">Total: ${formatCurrency(total)}</p>`), patientFilename(journey.patient.name, journey.patient.patient_id, "Pharmacy_slip"));
                           } else if (d.type === "final_bill") {
-                            setReportModal({ title: "Final bill", loading: false, content: { "Total charges": formatCurrency(fs.total_charges), "Payments received": formatCurrency(fs.payments_received), "Outstanding": formatCurrency(fs.outstanding) } });
+                            void openPdfPreview("Final bill", docShell("Final bill", `<h3 style="margin:0 0 8px;">Bill summary</h3>${
+                              docTable(["Charges by category", "Amount"], fs.categories.map((c) => [c.label, formatCurrency(c.amount)]))
+                            }<table style="width:320px;margin:12px 0 0 auto;font-size:13px;"><tr><td>Total charges</td><td style="text-align:right;">${formatCurrency(fs.total_charges)}</td></tr><tr><td>Payments received</td><td style="text-align:right;">${formatCurrency(fs.payments_received)}</td></tr><tr><td><strong>Outstanding</strong></td><td style="text-align:right;"><strong>${formatCurrency(fs.outstanding)}</strong></td></tr></table>${
+                              journey.payments.length ? `<h3 style="margin:16px 0 8px;">Payments</h3>${docTable(["Date", "Mode", "Reference", "Invoice", "Amount"], journey.payments.map((pm) => [`${pm.date} ${pm.time}`, pm.mode, pm.reference, pm.invoice_no || "-", formatCurrency(pm.amount)]))}` : ""
+                            }`), patientFilename(journey.patient.name, journey.patient.patient_id, "Final_bill"));
                           } else if (d.type === "emergency_certificate") {
                             if (d.ref) setCertificateAdmission(d.ref);
                           } else if (d.type === "discharge_summary") {
@@ -1007,14 +1045,12 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                             setReportModal({ title: "Discharge summary", loading: false, content: { "Discharged": `${evt?.date || ""} ${evt?.time || ""}`, "Notes": evt?.subtitle || "-" } });
                           } else if (d.type === "prescription") {
                             const rx = journey.events.find((e) => e.type === "prescription")?.prescription;
-                            setReportModal({ title: "Prescription", loading: false, content: rx ? {
-                              "Reference": `RX-${rx.id}`,
-                              "Medicines": rx.medicines.map((m) => [m.name, m.dosage, m.frequency, m.duration, m.instructions].filter(Boolean).join(" · ")).join("; ") || "-",
-                              ...(rx.diagnosis ? { "Diagnosis": rx.diagnosis } : {}),
-                              ...(rx.lab_tests ? { "Tests advised": rx.lab_tests } : {}),
-                              ...(rx.advice ? { "Advice": rx.advice } : {}),
-                              ...(rx.follow_up_date ? { "Follow-up": rx.follow_up_date } : {}),
-                            } : { "Reference": `RX-${d.ref}` } });
+                            if (!rx) { setReportModal({ title: "Prescription", loading: false, content: { "Reference": `RX-${d.ref}` } }); return; }
+                            const notes = [["Diagnosis", rx.diagnosis], ["Tests advised", rx.lab_tests], ["Advice", rx.advice], ["Follow-up", rx.follow_up_date]]
+                              .filter(([, v]) => v).map(([k, v]) => `<p style="margin:6px 0;"><strong>${k}:</strong> ${escapeBrandText(String(v))}</p>`).join("");
+                            void openPdfPreview("Prescription", docShell("Prescription", `<h3 style="margin:0 0 8px;">Prescription RX-${rx.id}</h3>${
+                              rx.medicines.length ? docTable(["Medicine", "Dosage", "Frequency", "Duration", "Instructions"], rx.medicines.map((m) => [m.name, m.dosage || "-", m.frequency || "-", m.duration || "-", m.instructions || "-"])) : "<p>No medicines prescribed.</p>"
+                            }${notes}`), patientFilename(journey.patient.name, journey.patient.patient_id, `Prescription_RX-${rx.id}`));
                           }
                         }}
                         style={{ fontSize: "12px", fontWeight: 700, color: "#0891b2", background: "none", border: "none", cursor: "pointer" }}
@@ -1078,6 +1114,23 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
 
       <EmergencyCertificateModal open={certificateAdmission != null} onClose={() => setCertificateAdmission(null)} admissionKey={certificateAdmission} setNotice={setNotice} />
 
+      {pdfPreview && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100, padding: "16px" }} onClick={closePdfPreview}>
+          <div style={{ background: "#fff", borderRadius: "14px", width: "min(920px, 96vw)", height: "90vh", display: "flex", flexDirection: "column", overflow: "hidden" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", padding: "12px 18px", borderBottom: "1px solid #e2e8f0", flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0, fontSize: "15px", fontWeight: 800, color: "#0f172a" }}>{pdfPreview.title}</h3>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <Button size="sm" variant="secondary" disabled={!pdfPreview.html} onClick={() => pdfPreview.html && printViaIframe(pdfPreview.html)}>🖨️ Print</Button>
+                <Button size="sm" variant="secondary" disabled={!pdfPreview.blob} onClick={() => pdfPreview.blob && downloadPDF(pdfPreview.blob, `${pdfPreview.filename || "document"}.pdf`)}>⬇ Download</Button>
+                <button type="button" onClick={closePdfPreview} style={{ background: "none", border: "none", fontSize: "18px", cursor: "pointer", color: "#64748b" }}>✕</button>
+              </div>
+            </div>
+            {pdfPreview.loading || !pdfPreview.url
+              ? <p style={{ padding: "24px", color: "#64748b", fontSize: "13px" }}>Preparing the document…</p>
+              : <iframe title={pdfPreview.title} src={pdfPreview.url} style={{ flex: 1, width: "100%", border: 0 }} />}
+          </div>
+        </div>
+      )}
       {reportModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }} onClick={() => setReportModal(null)}>
           <div style={{ background: "#fff", borderRadius: "14px", padding: "22px 26px", minWidth: "380px", maxWidth: "560px", maxHeight: "70vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>

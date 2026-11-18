@@ -1,7 +1,7 @@
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import { buildPrintableHtml, capturePrintHtml } from "./printViaIframe";
-import { downloadPDF } from "./exportService";
+import { downloadPDF, drawPdfFooter } from "./exportService";
 import { splitStoredPhone, toWhatsAppNumber } from "./phone";
 
 /**
@@ -102,10 +102,13 @@ export async function sharePdfFile(opts: WhatsAppPdfShareOptions, notify?: Notif
   return "downloaded";
 }
 
+// One PDF page of content in capture pixels: A4 minus the 10 mm top and 22 mm footer margins, at a 794 px wide capture.
+const PDF_PAGE_PX = Math.floor(((297 - 10 - 22) * 794) / 190);
+
 /** Renders an HTML document (as printed by printViaIframe) into an A4 PDF. */
 export async function htmlToPdfBlob(html: string): Promise<Blob> {
   const iframe = document.createElement("iframe");
-  iframe.setAttribute("style", "position:fixed;left:-10000px;top:0;width:794px;height:1123px;border:0;opacity:0;pointer-events:none;");
+  iframe.setAttribute("style", `position:fixed;left:-10000px;top:0;width:794px;height:${PDF_PAGE_PX}px;border:0;opacity:0;pointer-events:none;`);
   document.body.appendChild(iframe);
   try {
     const doc = iframe.contentDocument;
@@ -142,14 +145,16 @@ export async function elementToPdfBlob(element: HTMLElement, windowWidth?: numbe
   });
   const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
   const margin = 10;
+  const bottomMargin = 22; // room for the page footer (rule, logo, thank-you line, page number)
   const pageW = 210 - margin * 2;
-  const pageH = 297 - margin * 2;
+  const pageH = 297 - margin - bottomMargin;
   const pxPerMm = canvas.width / pageW;
   const sliceH = Math.floor(pageH * pxPerMm);
   let y = 0;
   let first = true;
   while (y < canvas.height) {
     const h = Math.min(sliceH, canvas.height - y);
+    if (!first && h < 12) break; // a sliver of padding must not become an extra, blank page
     const part = document.createElement("canvas");
     part.width = canvas.width;
     part.height = h;
@@ -163,6 +168,8 @@ export async function elementToPdfBlob(element: HTMLElement, windowWidth?: numbe
     first = false;
     y += h;
   }
+  // The shared hospital footer on every page (the page's own watermark is already in the captured content).
+  drawPdfFooter(pdf, { watermark: false });
   return pdf.output("blob");
 }
 
