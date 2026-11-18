@@ -224,6 +224,18 @@ def _doctor(db: Session, user: dict, day: str, perms: set) -> dict:
           AND oi.progress_status NOT IN ('released', 'cancelled')
           AND LOWER(TRIM(o.referring_clinician)) = :d
     """, p)
+    # Medicines the patient returned to the pharmacy that were dispensed on this doctor's prescriptions.
+    return_rows = _rows(db, """
+        SELECT COUNT(*) AS c, COALESCE(SUM(r.quantity), 0) AS units, COALESCE(SUM(r.refund_amount), 0) AS refund
+        FROM pharmacy_returns r
+        JOIN pharmacy_sales s ON s.id = r.original_sale_id
+        JOIN prescription_items pi ON pi.id = s.prescription_item_id
+        JOIN prescriptions rx ON rx.id = pi.prescription_id
+        WHERE LOWER(TRIM(rx.doctor_name)) = :d AND DATE(r.created_at) = DATE(:day)
+    """, p)
+    med_returns = int((return_rows[0].get("c") if return_rows else 0) or 0)
+    med_return_units = int(float((return_rows[0].get("units") if return_rows else 0) or 0))
+    med_return_refund = float((return_rows[0].get("refund") if return_rows else 0) or 0)
     results_released = _scalar(db, """
         SELECT COUNT(*) FROM diag_order_items oi JOIN diag_orders o ON o.id = oi.order_id
         WHERE oi.progress_status = 'released' AND oi.cancelled_at IS NULL
@@ -268,6 +280,9 @@ def _doctor(db: Session, user: dict, day: str, perms: set) -> dict:
                 icon="flask", accent="blue", page="doctors-history"),
             kpi("follow_ups", "Follow-ups", follow_ups, sub="Follow-up visits booked", icon="repeat",
                 accent="green", page="op-queue-management"),
+            kpi("medicine_returns", "Medicine Returns", med_returns,
+                sub=(f"{med_return_units} unit(s) · ₹{med_return_refund:,.0f} refunded" if med_returns else "Returned by patients on this day"),
+                icon="return", accent="red"),
         ],
         "tasks": [
             task("queue", "Patients waiting for consultation", waiting, page="op-queue-management", severity="high", icon="🩺"),
@@ -560,8 +575,11 @@ def _lab(db: Session, user: dict, day: str, perms: set) -> dict:
         ("Authorized / Released", ("authorized", "released")),
     ])
     stat_list = _rows(db, """
-        SELECT o.order_no, COALESCE(o.patient_id, o.walkin_name) AS patient, oi.service_name, oi.progress_status
+        SELECT o.order_no, COALESCE(o.patient_id, 'Walk-in') AS patient_id,
+               COALESCE(NULLIF(TRIM(COALESCE(pt.name, '') || ' ' || COALESCE(pt.last_name, '')), ''), NULLIF(TRIM(o.walkin_name), ''), '-') AS patient_name,
+               oi.service_name, oi.progress_status
         FROM diag_order_items oi JOIN diag_orders o ON o.id = oi.order_id
+        LEFT JOIN patients pt ON pt.patient_id = o.patient_id
         WHERE o.status = 'confirmed' AND oi.cancelled_at IS NULL
           AND oi.progress_status NOT IN ('released', 'cancelled')
         ORDER BY CASE o.priority WHEN 'STAT' THEN 0 WHEN 'Urgent' THEN 1 ELSE 2 END, o.created_at
@@ -598,12 +616,26 @@ def _lab(db: Session, user: dict, day: str, perms: set) -> dict:
         "worklist": {
             "title": "Priority Worklist",
             "page": "diag-laboratory",
-            "columns": ["Order", "Patient", "Test", "Stage"],
-            "rows": [[r.get("order_no"), r.get("patient") or "-", r.get("service_name"),
-                      (r.get("progress_status") or "").replace("_", " ").title()] for r in stat_list],
+            "columns": ["Order", "Patient ID", "Patient Name", "Test", "Stage", "Report"],
+            "rows": [[r.get("order_no"), r.get("patient_id") or "-", r.get("patient_name") or "-", r.get("service_name"),
+                      (r.get("progress_status") or "").replace("_", " ").title(),
+                      _lab_report_state(r.get("progress_status"))] for r in stat_list],
             "empty": "No open tests.",
         },
     }
+
+
+def _lab_report_state(progress_status) -> str:
+    """Where the report for a test stands, from its progress status."""
+    status = str(progress_status or "").strip().lower()
+    if status in ("authorized",):
+        return "Ready to release"
+    if status in ("in_progress", "exam_completed", "results_entered"):
+        return "Being prepared"
+    if status == "released":
+        return "Released"
+    return "Pending"
+
 
 
 def _billing(db: Session, user: dict, day: str, perms: set) -> dict:
