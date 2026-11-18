@@ -229,6 +229,43 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
   // Same pipeline the Main Dashboard's own Print button uses (a real
   // backend-rendered PDF via generatePDFBlob, then printPDF opens it) --
   // every report in the app shares one template, not a second one just here.
+  // Credit amount of a return: the refund recorded when it was released; until then (still
+  // quarantined) the value of the returned units, same basis the overview card uses.
+  const returnCreditAmount = (r: any) => {
+    const recorded = Number(r.refund_amount) || 0;
+    return recorded > 0 ? recorded : (Number(r.quantity) || 0) * (Number(r.unit_price) || 0);
+  };
+
+  const handlePrintCreditNote = (r: any) => {
+    const amount = returnCreditAmount(r);
+    const released = Number(r.refund_amount) > 0;
+    const fmt = (v: number) => `₹${v.toFixed(2)}`;
+    try {
+      printViaIframe(buildPrintDocumentHtml({
+        title: `Credit Note - RET-${r.id}`,
+        subtitleLines: [`Medicine return by patient · Return RET-${r.id}`],
+        meta: [
+          { label: "Credit Note No", value: `CN-RET-${r.id}` },
+          { label: "Patient ID", value: r.patient_id || "-" },
+          { label: "Patient Name", value: r.patient_name || "-" },
+          { label: "Original Sale", value: `Sale #${r.original_sale_id}${r.invoice_id ? ` · Invoice ${r.invoice_id}` : ""}` },
+          { label: "Return Date", value: r.created_at ? new Date(r.created_at).toLocaleDateString("en-IN") : "-" },
+          { label: "Status", value: r.status || "-" },
+        ],
+        columns: ["Medicine", "Batch", "Returned Qty", "Unit Price", "Credit Amount", "Reason"],
+        rows: [[r.medicine_name || "-", r.batch_no || "-", r.quantity, fmt(Number(r.unit_price) || 0), fmt(amount), r.reason || "-"]],
+        alignRight: [3, 4],
+        alignCenter: [2],
+        totals: [
+          { label: released ? "Credit / Refund Amount" : "Credit Amount (pending approval)", value: fmt(amount), grand: true },
+          ...(released && Number(r.cash_refunded) > 0 ? [{ label: "Refunded in cash", value: fmt(Number(r.cash_refunded)) }] : []),
+        ],
+      }));
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to print the credit note." });
+    }
+  };
+
   const handlePrintReport = async () => {
     let columns: string[] = [];
     let rows: (string | number)[][] = [];
@@ -263,8 +300,9 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
       });
       grandTotalLabel = "Total Posted to Admissions"; grandTotalValue = `₹${grandTotal.toFixed(2)}`;
     } else {
-      columns = ["Return ID", "Original Sale", "Qty", "Reason", "Status", "Date"];
-      rows = returns.map((r) => [r.id, r.original_sale_id, r.quantity, r.reason || "-", r.status, r.created_at || "-"]);
+      columns = ["Return ID", "Patient ID", "Patient Name", "Medicine", "Sale Ref", "Qty", "Credit Amount", "Reason", "Status", "Date"];
+      rows = filteredReturns.map((r) => [`RET-${r.id}`, r.patient_id || "-", r.patient_name || "-", r.medicine_name || "-", `Sale #${r.original_sale_id}`, r.quantity, `₹${returnCreditAmount(r).toFixed(2)}`, r.reason || "-", r.status || "-", r.created_at ? new Date(r.created_at).toLocaleDateString("en-IN") : "-"]);
+      grandTotalLabel = "Total Credit Amount"; grandTotalValue = `₹${filteredReturns.reduce((sum, r) => sum + returnCreditAmount(r), 0).toFixed(2)}`;
     }
 
     try {
@@ -574,19 +612,28 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
               <thead>
                 <tr style={{ borderBottom: "2px solid #e2e8f0", textAlign: "left", color: "#64748b" }}>
                   <th style={{ padding: "0.5rem" }}>Return ID</th>
+                  <th style={{ padding: "0.5rem" }}>Patient ID</th>
+                  <th style={{ padding: "0.5rem" }}>Patient Name</th>
+                  <th style={{ padding: "0.5rem" }}>Medicine</th>
                   <th style={{ padding: "0.5rem" }}>Sale Ref</th>
                   <th style={{ padding: "0.5rem", textAlign: "center" }}>Returned Qty</th>
+                  <th style={{ padding: "0.5rem", textAlign: "right" }}>Credit Amount</th>
                   <th style={{ padding: "0.5rem" }}>Reason</th>
                   <th style={{ padding: "0.5rem" }}>Status</th>
                   <th style={{ padding: "0.5rem" }}>Date</th>
+                  <th style={{ padding: "0.5rem" }}>Credit Note</th>
                 </tr>
               </thead>
               <tbody>
                 {returns.map((r) => (
                   <tr key={r.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
                     <td style={{ padding: "0.5rem", fontWeight: 700, color: "#e11d48" }}>RET-{r.id}</td>
+                    <td style={{ padding: "0.5rem" }}>{r.patient_id || "-"}</td>
+                    <td style={{ padding: "0.5rem", fontWeight: 600 }}>{r.patient_name || "-"}</td>
+                    <td style={{ padding: "0.5rem" }}>{r.medicine_name || "-"}</td>
                     <td style={{ padding: "0.5rem" }}>Sale #{r.original_sale_id}</td>
                     <td style={{ padding: "0.5rem", textAlign: "center", fontWeight: 700 }}>{r.quantity}</td>
+                    <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 700 }}>₹{returnCreditAmount(r).toFixed(2)}</td>
                     <td style={{ padding: "0.5rem", color: "#475569" }}>{r.reason || "Return"}</td>
                     <td style={{ padding: "0.5rem" }}>
                       <span style={{ padding: "2px 8px", borderRadius: "10px", fontSize: "0.72rem", fontWeight: 700, background: "#fee2e2", color: "#991b1b" }}>
@@ -595,6 +642,9 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
                     </td>
                     <td style={{ padding: "0.5rem", color: "#64748b", fontSize: "0.8rem" }}>
                       {r.created_at ? new Date(r.created_at).toLocaleDateString() : "-"}
+                    </td>
+                    <td style={{ padding: "0.5rem" }}>
+                      <Button type="button" size="sm" variant="secondary" onClick={() => handlePrintCreditNote(r)}>🖨️ Print</Button>
                     </td>
                   </tr>
                 ))}
