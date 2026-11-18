@@ -78,6 +78,8 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
   const [discharged, setDischarged] = useState<DischargedAdmission[]>([]);
   const [loadingDischarged, setLoadingDischarged] = useState(false);
   const [dischargedLoaded, setDischargedLoaded] = useState(false);
+  // Date filter (top right): admitted that day on the Currently Admitted tab, discharged that day on the Discharged tab. Empty = all dates.
+  const [selectedDate, setSelectedDate] = useState("");
   const [dischargeSearch, setDischargeSearch] = useState("");
   const [dischargeFromDate, setDischargeFromDate] = useState("");
   const [dischargeToDate, setDischargeToDate] = useState("");
@@ -122,8 +124,10 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
     try {
       const params = new URLSearchParams();
       if (dischargeSearch.trim()) params.set("q", dischargeSearch.trim());
-      if (dischargeFromDate) params.set("from_date", dischargeFromDate);
-      if (dischargeToDate) params.set("to_date", dischargeToDate);
+      const fromDate = selectedDate || dischargeFromDate;
+      const toDate = selectedDate || dischargeToDate;
+      if (fromDate) params.set("from_date", fromDate);
+      if (toDate) params.set("to_date", toDate);
       const data = await apiFetch<{ discharged?: DischargedAdmission[] }>(`/api/admissions/discharged?${params.toString()}`);
       setDischarged(data.discharged || []);
     } catch (error) {
@@ -133,6 +137,11 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
       setDischargedLoaded(true);
     }
   };
+
+  useEffect(() => {
+    if (activeTab === "discharged" && dischargedLoaded) void loadDischarged();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate]);
 
   useEffect(() => {
     if (activeTab === "discharged" && !dischargedLoaded) {
@@ -235,11 +244,21 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
     }
   };
 
-  const filtered = inpatients.filter((b) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return b.patient_name.toLowerCase().includes(q) || b.patient_id.toLowerCase().includes(q) || b.ward.toLowerCase().includes(q);
-  });
+  const localDay = (value?: string) => {
+    if (!value) return "";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  // Newest admission first; narrowed to the chosen day when a date is selected.
+  const filtered = inpatients
+    .filter((b) => {
+      if (selectedDate && localDay(b.allocated_at) !== selectedDate) return false;
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase();
+      return b.patient_name.toLowerCase().includes(q) || b.patient_id.toLowerCase().includes(q) || b.ward.toLowerCase().includes(q);
+    })
+    .sort((x, y) => new Date(y.allocated_at).getTime() - new Date(x.allocated_at).getTime());
 
   return (
     <div className="bed-management-page" style={{ padding: "18px 28px 48px", background: "#f8fafc", minHeight: "100vh" }}>
@@ -258,7 +277,21 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
             {activeTab === "admitted" ? "Patients currently occupying an allocated bed." : "Discharge history — who left, and when."}
           </p>
         </div>
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+          <div className="opq-date-pill" title={activeTab === "admitted" ? "Show patients admitted on this date" : "Show patients discharged on this date"}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00828a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+              <line x1="16" y1="2" x2="16" y2="6" />
+              <line x1="8" y1="2" x2="8" y2="6" />
+              <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            <input type="date" className="opq-date-input" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} aria-label="Filter by date" />
+            {selectedDate && (
+              <button type="button" onClick={() => setSelectedDate("")} title="Show all dates" style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b", fontWeight: 700, fontSize: 12 }}>
+                ✕ All dates
+              </button>
+            )}
+          </div>
           <Button
             variant={activeTab === "admitted" ? "primary" : "ghost"}
             style={activeTab === "admitted" ? { background: "#00828a", borderColor: "#00828a" } : { background: "#ffffff", border: "1px solid #cbd5e1" }}
@@ -297,7 +330,7 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
             <tbody>
               {loading && <tr><td colSpan={5} style={{ textAlign: "center", padding: "1rem" }}>Loading…</td></tr>}
               {!loading && filtered.length === 0 && (
-                <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem", color: "#94a3b8" }}>No patients currently admitted.</td></tr>
+                <tr><td colSpan={4} style={{ textAlign: "center", padding: "1rem", color: "#94a3b8" }}>{selectedDate ? "No patients were admitted on this date." : "No patients currently admitted."}</td></tr>
               )}
               {!loading && filtered.map((b) => (
                 <tr key={b.id} onClick={() => void openView(b)} style={{ cursor: "pointer" }} title="Click row to view details">
