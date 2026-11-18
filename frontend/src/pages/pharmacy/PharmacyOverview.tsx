@@ -1105,6 +1105,28 @@ export default function PharmacyOverview({ setNotice, onNavigate }: Props) {
         <button
           type="button"
           className="hosp-kpi-card hosp-clickable-card"
+          style={{ "--kpi-accent": "linear-gradient(135deg,#14b8a6,#0f766e)" } as React.CSSProperties}
+          onClick={() => onNavigate("pharmacy-reports")}
+          title="Medicines returned by patients today - open Pharmacy Reports"
+        >
+          <div className="hosp-kpi-icon" style={{ background: "linear-gradient(135deg,#14b8a6,#0f766e)" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="1 4 1 10 7 10" />
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+          </div>
+          <div className="hosp-kpi-body">
+            <p className="hosp-kpi-label">Patient Returns</p>
+            <h3 className="hosp-kpi-value">{summary?.today_activity?.returns ?? 0}</h3>
+            <span className="hosp-kpi-sub">
+              {summary?.today_activity?.returns_qty ?? 0} units · ₹{(summary?.today_activity?.returns_amount ?? 0).toLocaleString("en-IN")} refunded
+            </span>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          className="hosp-kpi-card hosp-clickable-card"
           style={{ "--kpi-accent": "linear-gradient(135deg,#ef4444,#b91c1c)" } as React.CSSProperties}
           onClick={() => onNavigate("pharmacy-inventory-stock")}
         >

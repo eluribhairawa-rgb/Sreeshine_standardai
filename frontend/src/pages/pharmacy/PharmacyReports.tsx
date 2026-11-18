@@ -236,12 +236,12 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
     let grandTotalValue = "";
 
     if (reportCategory === "sales") {
-      columns = ["Medicine", "Qty", "Unit Price", "Amount", "Source", "Type", "Date"];
+      columns = ["Medicine", "Qty", "Unit Price", "Amount", "Type", "Patient UHID", "Date / Time"];
       let grandTotal = 0;
       rows = filteredSales.map((s) => {
         const amount = s.amount || 0;
         grandTotal += amount;
-        return [s.medicine_name, s.quantity, `₹${(s.unit_price || 0).toFixed(2)}`, `₹${amount.toFixed(2)}`, s.stock_source || "CASH", s.admission_id ? "IPD Issue" : "OP Dispense", s.sold_at ? new Date(s.sold_at).toLocaleDateString("en-IN") : "-"];
+        return [s.medicine_name, s.quantity, `₹${(s.unit_price || 0).toFixed(2)}`, `₹${amount.toFixed(2)}`, s.admission_id ? "IPD Issue" : "OP Dispense", s.patient_id || "-", s.sold_at ? new Date(s.sold_at).toLocaleString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true }) : "-"];
       });
       grandTotalLabel = "Total Revenue"; grandTotalValue = `₹${grandTotal.toFixed(2)}`;
     } else if (reportCategory === "inventory") {
@@ -414,9 +414,10 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
 
           {/* Sales Breakdown Table */}
           <div style={{ background: "#ffffff", borderRadius: "10px", padding: "1.25rem", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-            <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>
-              Itemized Sales Breakdown
-            </h3>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", margin: "0 0 1rem 0", flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>Itemized Sales Breakdown</h3>
+              <Button type="button" size="sm" variant="secondary" onClick={handlePrintReport}>🖨️ Print</Button>
+            </div>
             <div style={{ overflowX: "auto" }}>
               <table className="pharmacy-data-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                 <thead>
@@ -482,9 +483,10 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
           </div>
 
           <div style={{ background: "#ffffff", borderRadius: "10px", padding: "1.25rem", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-            <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>
-              Valuation by Batch
-            </h3>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", margin: "0 0 1rem 0", flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>Valuation by Batch</h3>
+              <Button type="button" size="sm" variant="secondary" onClick={handlePrintReport}>🖨️ Print</Button>
+            </div>
             <div style={{ overflowX: "auto" }}>
               <table className="pharmacy-data-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                 <thead>
@@ -522,9 +524,10 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
       {/* 3. IPD WARD CONSUMPTION */}
       {reportCategory === "ipd" && (
         <div style={{ background: "#ffffff", borderRadius: "10px", padding: "1.25rem", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-          <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>
-            Inpatient Medication Consumption by Admission
-          </h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", margin: "0 0 1rem 0", flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>Inpatient Medication Consumption by Admission</h3>
+            <Button type="button" size="sm" variant="secondary" onClick={handlePrintReport}>🖨️ Print</Button>
+          </div>
           <p style={{ fontSize: "0.85rem", color: "#64748b", margin: "0 0 1rem 0" }}>
             All running pharmacy charges posted to IPD patient accounts during hospital stay:
           </p>
@@ -561,9 +564,10 @@ export default function PharmacyReports({ setNotice, onNavigate }: Props) {
       {/* 4. RETURNS & REVERSALS */}
       {reportCategory === "returns" && (
         <div style={{ background: "#ffffff", borderRadius: "10px", padding: "1.25rem", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-          <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>
-            Pharmacy Returns & Reversals Audit Log
-          </h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", margin: "0 0 1rem 0", flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#0f172a" }}>Pharmacy Returns & Reversals Audit Log</h3>
+            <Button type="button" size="sm" variant="secondary" onClick={handlePrintReport}>🖨️ Print</Button>
+          </div>
 
           {returns.length > 0 ? (
             <table className="pharmacy-data-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
