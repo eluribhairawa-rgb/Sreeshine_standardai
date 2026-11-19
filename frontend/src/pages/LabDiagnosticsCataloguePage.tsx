@@ -209,6 +209,17 @@ export default function LabDiagnosticsCataloguePage({ setNotice }: Props) {
 
   const addParamRow = () => setParams((prev) => [...prev, blankParam(prev.length)]);
 
+  // Turn a parameter into Male + Female variants: this row becomes M, a copy right below becomes F (edit its range).
+  const splitBySex = (idx: number) =>
+    setParams((prev) => {
+      const next = [...prev];
+      const base = next[idx];
+      next[idx] = { ...base, sex_specific: "M" };
+      const { id: _id, ...rest } = base;
+      next.splice(idx + 1, 0, { ...rest, sex_specific: "F" });
+      return next.map((row, i) => ({ ...row, display_order: i }));
+    });
+
   const saveParameters = async () => {
     if (!selected) return;
     setSaving(true);
@@ -398,12 +409,29 @@ export default function LabDiagnosticsCataloguePage({ setNotice }: Props) {
 
               {editTab === "parameters" && selected && (
                 <div>
-                  <table className="diag-data-table">
-                    <thead><tr><th>Name</th><th>Type</th><th>Unit</th><th>Ref low</th><th>Ref high</th><th>Reference (text)</th><th>Critical low</th><th>Critical high</th><th></th></tr></thead>
+                  <div style={{ overflowX: "auto" }}>
+                  <table className="diag-data-table" style={{ minWidth: 900 }}>
+                    <thead><tr><th>Name</th><th>Sex</th><th>Type</th><th>Unit</th><th>Ref low</th><th>Ref high</th><th>Reference (text)</th><th>Critical low</th><th>Critical high</th><th></th></tr></thead>
                     <tbody>
                       {params.map((p, idx) => (
                         <tr key={idx}>
                           <td><Input value={p.name} onChange={(e) => updateParam(idx, { name: e.target.value })} /></td>
+                          <td>
+                            <Select
+                              value={p.sex_specific || ""}
+                              onChange={(e) => updateParam(idx, { sex_specific: e.target.value || null })}
+                              title="All = same range for everyone. M / F = used only for male / female patients."
+                            >
+                              <option value="">All</option>
+                              <option value="M">M</option>
+                              <option value="F">F</option>
+                            </Select>
+                            {p.sex_specific && (
+                              <span className={`diag-badge ${p.sex_specific === "M" ? "diag-badge-info" : "diag-badge-warning"}`} style={{ marginTop: 4, display: "inline-block" }}>
+                                {p.sex_specific === "M" ? "Male" : "Female"}
+                              </span>
+                            )}
+                          </td>
                           <td>
                             <Select value={p.data_type} onChange={(e) => updateParam(idx, { data_type: e.target.value as ServiceParam["data_type"] })}>
                               <option value="numeric">Numeric</option>
@@ -424,17 +452,26 @@ export default function LabDiagnosticsCataloguePage({ setNotice }: Props) {
                           </td>
                           <td><Input type="number" value={p.critical_low ?? ""} onChange={(e) => updateParam(idx, { critical_low: numOrNull(e.target.value) })} /></td>
                           <td><Input type="number" value={p.critical_high ?? ""} onChange={(e) => updateParam(idx, { critical_high: numOrNull(e.target.value) })} /></td>
-                          <td><Button variant="ghost" size="sm" onClick={() => removeParam(idx)}>Remove</Button></td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            {!p.sex_specific && <Button variant="ghost" size="sm" onClick={() => splitBySex(idx)} title="Make separate Male and Female rows">M / F</Button>}
+                            <Button variant="ghost" size="sm" onClick={() => removeParam(idx)}>Remove</Button>
+                          </td>
                         </tr>
                       ))}
+                      {params.length === 0 && (
+                        <tr><td colSpan={10} className="diag-empty">No parameters for this test yet. Click "+ Add parameter" to add them (use the Sex column for separate Male / Female ranges), then "Save parameters".</td></tr>
+                      )}
                     </tbody>
                   </table>
+                  </div>
                   <div className="diag-form-actions">
                     <Button variant="secondary" size="sm" onClick={addParamRow}>+ Add parameter</Button>
                     <Button variant="primary" disabled={saving} onClick={() => void saveParameters()}>{saving ? "Saving..." : "Save parameters"}</Button>
                   </div>
                   <p className="muted" style={{ marginTop: "0.5rem" }}>
                     Reference intervals and critical thresholds set here are the only values used during result entry -- they are never invented at the bedside.
+                    For a parameter with different ranges for men and women, add one row marked <strong>M</strong> and one marked <strong>F</strong> with the same name
+                    (the <strong>M / F</strong> button splits a row): result entry shows only the row that matches the patient's sex, and rows marked <strong>All</strong> apply to everyone.
                   </p>
                 </div>
               )}

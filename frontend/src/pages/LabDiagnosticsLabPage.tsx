@@ -21,7 +21,7 @@ type WorklistRow = {
   routing?: "in_house" | "outsourced" | "pending_vendor" | null;
 };
 
-type ParamDef = { id: number; name: string; data_type: string; unit?: string; method?: string; ref_low?: number; ref_high?: number; ref_text?: string; critical_low?: number; critical_high?: number; auto_created?: boolean };
+type ParamDef = { id: number; name: string; data_type: string; unit?: string; method?: string; ref_low?: number; ref_high?: number; ref_text?: string; critical_low?: number; critical_high?: number; auto_created?: boolean; sex_specific?: string | null };
 type ResultRow = { id: number; parameter_id: number; parameter_name: string; value_text?: string; value_numeric?: number; unit?: string; ref_range_text?: string; ref_low?: number; ref_high?: number; flag?: string; is_draft: boolean; equipment_id?: number; reagent_lot_id?: number };
 type Specimen = { id: number; specimen_no: string; status: string; container_type?: string; collection_location?: string; collected_at?: string; received_at?: string; rejection_reason?: string };
 type ItemDetail = {
@@ -666,6 +666,7 @@ export default function LabDiagnosticsLabPage({ setNotice, onNavigate }: Props) 
                           <tr key={p.id} className={flag && flag !== "normal" ? `diag-row-${flag}` : undefined}>
                             <td>
                               {p.name}
+                              {p.sex_specific && <span className="diag-badge diag-badge-info" style={{ marginLeft: 6 }} title={`Reference range for ${p.sex_specific === "M" ? "male" : "female"} patients`}>{p.sex_specific}</span>}
                               {p.auto_created && <span className="diag-badge diag-badge-info" style={{ marginLeft: 6 }} title="Added automatically from an uploaded report. Check the unit and reference range in the catalogue.">NEW</span>}
                             </td>
                             <td>

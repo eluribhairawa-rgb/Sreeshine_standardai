@@ -14183,6 +14183,11 @@ label,
   align-items: start;
 }
 
+/* A wide table inside one column must scroll within its card, not stretch the whole page sideways. */
+.diag-split > * {
+  min-width: 0;
+}
+
 @media (max-width: 1180px) {
   .diag-split {
     grid-template-columns: 1fr;

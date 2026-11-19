@@ -11742,7 +11742,7 @@ def replace_diag_service_parameters(db, service_id, parameters):
                     p.get("ref_text"),
                     p.get("critical_low"),
                     p.get("critical_high"),
-                    p.get("sex_specific") or None,
+                    normalize_patient_sex(p.get("sex_specific")),
                     p.get("age_min"),
                     p.get("age_max"),
                     p.get("display_order", idx),
@@ -12410,13 +12410,54 @@ def list_diag_lab_worklist(db, stage=None, search=None, priority=None, order_dat
 
 
 
+def normalize_patient_sex(value):
+    """'M' / 'F' from a stored gender (Male, female, m, F ...); None when unknown or other."""
+    text_value = str(value or "").strip().lower()
+    if text_value in ("m", "male"):
+        return "M"
+    if text_value in ("f", "female"):
+        return "F"
+    return None
+
+
+
+def parameters_for_patient_sex(params, patient_sex):
+    """One catalogue row per parameter name, chosen for the patient's sex.
+
+    A parameter can be defined once per sex (sex_specific 'M' / 'F') and/or once for everyone (NULL).
+    Known sex: the row for that sex, else the NULL row; a parameter that only has the other sex's row
+    is left out (no reference range is defined for this patient). Unknown sex: the NULL row, else the
+    first row, so a parameter is never listed twice. Order follows the catalogue."""
+    groups, order = {}, []
+    for p in params:
+        key = " ".join(str(p.get("name") or "").lower().split())
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(p)
+    chosen = []
+    for key in order:
+        rows = groups[key]
+        sex_row = next((r for r in rows if patient_sex and r.get("sex_specific") == patient_sex), None)
+        general = next((r for r in rows if not r.get("sex_specific")), None)
+        if patient_sex:
+            pick = sex_row or general
+        else:
+            pick = general or rows[0]
+        if pick is not None:
+            chosen.append(pick)
+    chosen.sort(key=lambda r: (r.get("display_order") or 0, r.get("id") or 0))
+    return chosen
+
+
+
 def get_diag_lab_item_detail(db, order_item_id):
     with get_connection(db) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             SELECT oi.*, o.order_no, o.patient_id, o.encounter_type, o.admission_id, o.appointment_id,
-                   o.priority, o.clinical_indication, o.referring_clinician, o.walkin_name
+                   o.priority, o.clinical_indication, o.referring_clinician, o.walkin_name, o.walkin_gender
             FROM diag_order_items oi JOIN diag_orders o ON o.id = oi.order_id WHERE oi.id = ?
             """,
             (order_item_id,),
@@ -12431,7 +12472,10 @@ def get_diag_lab_item_detail(db, order_item_id):
         cursor.execute("SELECT * FROM diag_specimens WHERE order_item_id = ? ORDER BY id DESC", (order_item_id,))
         item_dict["specimens"] = [dict(r) for r in cursor.fetchall()]
         cursor.execute("SELECT * FROM diag_service_parameters WHERE service_id = ? ORDER BY display_order ASC, id ASC", (item_dict["service_id"],))
-        item_dict["parameters"] = [dict(r) for r in cursor.fetchall()]
+        # Sex-specific parameters (M / F rows of the same analyte): only the row for this patient is offered.
+        patient_sex = normalize_patient_sex(((item_dict.get("patient") or {}).get("gender")) or item_dict.get("walkin_gender"))
+        item_dict["patient_sex"] = patient_sex
+        item_dict["parameters"] = parameters_for_patient_sex([dict(r) for r in cursor.fetchall()], patient_sex)
         cursor.execute("SELECT * FROM diag_results WHERE order_item_id = ? ORDER BY id ASC", (order_item_id,))
         item_dict["results"] = [dict(r) for r in cursor.fetchall()]
         cursor.execute(
