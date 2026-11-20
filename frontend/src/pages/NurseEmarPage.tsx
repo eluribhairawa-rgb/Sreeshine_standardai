@@ -179,7 +179,11 @@ export default function NurseEmarPage({ setNotice }: Props) {
   }, []);
   const nowMs = tick + clockOffset;
 
-  const [detailTab, setDetailTab] = useState<"emar" | "vitals" | "notes">("emar");
+  const [detailTab, setDetailTab] = useState<"emar" | "vitals" | "notes" | "history">("emar");
+  // History tab: every dose that has been given / held / refused / missed plus every vitals reading, newest first.
+  const [historyMeds, setHistoryMeds] = useState<EmarRow[]>([]);
+  const [historyFilter, setHistoryFilter] = useState<"all" | "medication" | "vitals">("all");
+  const [historyTick, setHistoryTick] = useState(0);
   const [vitals, setVitals] = useState<VitalRow[]>([]);
   const [vitalsForm, setVitalsForm] = useState(EMPTY_VITALS_FORM);
   const [savingVitals, setSavingVitals] = useState(false);
@@ -251,6 +255,21 @@ export default function NurseEmarPage({ setNotice }: Props) {
   };
 
   useEffect(() => {
+    if (!selected || detailTab !== "history") return;
+    let cancelled = false;
+    const params = new URLSearchParams({ admission_id: String(selected.admission_id) });
+    Promise.all([
+      apiFetch<{ emar: EmarRow[] }>(`/api/patients/${encodeURIComponent(selected.patient_id)}/emar?${params}`),
+      apiFetch<{ vitals: VitalRow[] }>(`/api/patients/${selected.patient_id}/vitals?admission_id=${selected.admission_id}`),
+    ]).then(([e, v]) => {
+      if (cancelled) return;
+      setHistoryMeds((e.emar || []).filter((r) => r.status !== "pending"));
+      setVitals(v.vitals || []);
+    }).catch((err) => reportError(setNotice, err, "Could not load the history."));
+    return () => { cancelled = true; };
+  }, [selected, detailTab, historyTick]);
+
+  useEffect(() => {
     if (!selected) return;
     setVitalsForm((prev) => ({ ...EMPTY_VITALS_FORM, nurse_name: prev.nurse_name }));
     setNoteForm(EMPTY_NOTE_FORM);
@@ -271,6 +290,7 @@ export default function NurseEmarPage({ setNotice }: Props) {
       });
       setNotice({ type: "success", message: "Vitals recorded." });
       setVitalsForm({ ...EMPTY_VITALS_FORM, nurse_name: vitalsForm.nurse_name });
+      setHistoryTick((n) => n + 1);
       await loadVitals(selected);
     } catch (err: any) {
       reportError(setNotice, err, "Could not record vitals.");
@@ -323,6 +343,7 @@ export default function NurseEmarPage({ setNotice }: Props) {
       setNotice({ type: "success", message: action === "given" ? `${row.medicine_name} marked as administered${administeredAt ? ` at ${formatTime(administeredAt)}` : ""}.` : `${row.medicine_name} marked ${action}.` });
       setReasonTarget(null);
       setReasonText("");
+      setHistoryTick((n) => n + 1);
       if (selected) await loadEmar(selected, status);
     } catch (err: any) {
       reportError(setNotice, err, "Could not update this dose.");
@@ -405,7 +426,63 @@ export default function NurseEmarPage({ setNotice }: Props) {
                 <Button size="sm" variant={detailTab === "emar" ? "primary" : "secondary"} onClick={() => setDetailTab("emar")}>Medication (eMAR)</Button>
                 <Button size="sm" variant={detailTab === "vitals" ? "primary" : "secondary"} onClick={() => setDetailTab("vitals")}>Vitals</Button>
                 <Button size="sm" variant={detailTab === "notes" ? "primary" : "secondary"} onClick={() => setDetailTab("notes")}>Shift Notes</Button>
+                <Button size="sm" variant={detailTab === "history" ? "primary" : "secondary"} onClick={() => setDetailTab("history")}>History</Button>
               </div>
+
+              {detailTab === "history" && (() => {
+                type Entry = { key: string; at: number; kind: "medication" | "vitals"; node: React.ReactNode };
+                const entries: Entry[] = [];
+                historyMeds.forEach((r) => {
+                  const at = new Date(r.administered_at || r.scheduled_time).getTime();
+                  entries.push({
+                    key: `m${r.id}`, at: Number.isNaN(at) ? 0 : at, kind: "medication",
+                    node: (
+                      <div className="diag-worklist-row">
+                        <div className="diag-worklist-row-top">
+                          <span><strong>{r.medicine_name}</strong> {r.dose ? `- ${r.dose}` : ""} {r.route ? `(${r.route})` : ""}{r.frequency ? ` · ${r.frequency}` : ""}</span>
+                          <span className={`diag-badge ${badgeClass(r.status)}`}>{STATUS_OPTIONS.find((o) => o.key === r.status)?.label || r.status}</span>
+                        </div>
+                        <div className="diag-worklist-row-meta">
+                          <span>Scheduled {formatTime(r.scheduled_time)}</span>
+                          {r.administered_at && <span>{r.status === "given" ? "Given" : "Recorded"} {formatTime(r.administered_at)}</span>}
+                          <span>By {r.administered_by || "-"}</span>
+                          {r.notes && <span>{r.notes}</span>}
+                        </div>
+                      </div>
+                    ),
+                  });
+                });
+                vitals.forEach((v) => {
+                  const at = new Date(v.recorded_at || "").getTime();
+                  entries.push({
+                    key: `v${v.id}`, at: Number.isNaN(at) ? 0 : at, kind: "vitals",
+                    node: (
+                      <div className="diag-worklist-row">
+                        <div className="diag-worklist-row-top"><span><strong>Vitals recorded</strong></span><span className="diag-badge diag-badge-info">Vitals</span></div>
+                        <div className="diag-worklist-row-meta">
+                          <span>{formatTime(v.recorded_at)}</span><span>By {v.recorded_by || "-"}</span>
+                          <span>BP {v.bp || "-"}</span><span>Pulse {v.pulse ?? "-"}</span><span>Temp {v.temperature ?? "-"} °F</span>
+                          <span>SpO2 {v.spo2 ?? "-"}</span><span>RR {v.respiratory_rate ?? "-"}</span><span>Glucose {v.blood_sugar ?? "-"}</span><span>Pain {v.pain_score ?? "-"}</span>
+                        </div>
+                      </div>
+                    ),
+                  });
+                });
+                const shown = entries.filter((e) => historyFilter === "all" || e.kind === historyFilter).sort((a, b) => b.at - a.at);
+                return (
+                  <>
+                    <div style={{ maxWidth: 260, marginBottom: "0.75rem" }}>
+                      <Select value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value as "all" | "medication" | "vitals")}>
+                        <option value="all">All ({entries.length})</option>
+                        <option value="medication">Medication history ({historyMeds.length})</option>
+                        <option value="vitals">Vitals history ({vitals.length})</option>
+                      </Select>
+                    </div>
+                    {shown.length === 0 && <p className="muted">Nothing recorded yet. Administered doses and recorded vitals appear here.</p>}
+                    {shown.map((e) => <div key={e.key}>{e.node}</div>)}
+                  </>
+                );
+              })()}
 
               {detailTab === "vitals" && (
                 <>

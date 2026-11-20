@@ -1438,20 +1438,26 @@ def record_vitals(db, patient_id, data, username, encounter_id=None, admission_i
         cursor.execute(
             """
             INSERT INTO patient_vitals (
-                patient_id, bp, pulse, temperature, spo2, weight, height, admission_id, encounter_id, recorded_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                patient_id, patient_name, bp, pulse, temperature, spo2, respiratory_rate, blood_sugar, pain_score,
+                weight, height, admission_id, encounter_id, recorded_by, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 patient_id,
+                patient_name,
                 str(data.get("bp") or "").strip() or None,
                 parse_int(data.get("pulse")),
                 normalize_temperature_f(data.get("temperature"), strict=True),
                 parse_float(data.get("spo2")),
+                parse_int(data.get("respiratory_rate")),
+                parse_float(data.get("blood_sugar")),
+                pain_score,
                 parse_float(data.get("weight")),
                 parse_float(data.get("height")),
                 admission_id,
                 parse_int(encounter_id),
                 (str(data.get("nurse_name") or "").strip()[:80] or username),
+                username,
             ),
         )
         vital_id = cursor.lastrowid
