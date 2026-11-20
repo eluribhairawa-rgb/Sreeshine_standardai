@@ -95,6 +95,7 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, admissionKey, givenData]);
   const savedRef = useRef(false);
+  const [departmentOptions, setDepartmentOptions] = useState<string[]>([]);
   const savedBodyRef = useRef("");
 
   const patientName = [p.name, p.middle_name, p.last_name].filter(Boolean).join(" ").trim();
@@ -130,6 +131,22 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
       hospitalization: blankIfZero(hospitalization), lab: blankIfZero(lab), medicine: blankIfZero(pharmacy),
     });
     let cancelled = false;
+    // Departments to pick from: the hospital's departments plus anyone on the doctor schedule.
+    (async () => {
+      try {
+        const [d, sch] = await Promise.all([
+          apiFetch<{ departments?: { department_name?: string }[] }>("/api/registration/departments").catch(() => ({ departments: [] })),
+          apiFetch<{ schedules?: { department?: string }[] }>("/api/op/doctor-schedules").catch(() => ({ schedules: [] })),
+        ]);
+        const names = [...(d.departments || []).map((x) => x.department_name), ...(sch.schedules || []).map((x) => x.department)]
+          .map((n) => String(n || "").trim()).filter(Boolean);
+        const unique = Array.from(new Map(names.map((n) => [n.toLowerCase(), n])).values()).sort((a, b) => a.localeCompare(b));
+        if (!cancelled) setDepartmentOptions(unique);
+      } catch { /* optional */ }
+    })();
+    // The department the patient was admitted under (admission form / latest doctor transfer).
+    const admittedUnder = String(dischargeData?.admission_info?.department || "").trim();
+    if (admittedUnder) setForm((f) => (f.department ? f : { ...f, department: admittedUnder }));
     (async () => {
       const pid = encodeURIComponent(p.patient_id || "");
       if (!pid) return;
@@ -299,7 +316,8 @@ export default function EmergencyCertificateModal({ open, onClose, dischargeData
             <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Admitted on</label><input style={fieldStyle} value={form.admittedDate} onChange={set("admittedDate")} placeholder="DD-MM-YYYY" /></div>
             <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Admitted at</label><input style={fieldStyle} value={form.admittedTime} onChange={set("admittedTime")} placeholder="11:30 PM" /></div>
             <div style={{ gridColumn: "span 4" }}><label style={labelStyle}>Discharged on</label><input style={fieldStyle} value={form.dischargedDate} onChange={set("dischargedDate")} placeholder="DD-MM-YYYY" /></div>
-            <div style={{ gridColumn: "span 12" }}><label style={labelStyle}>Department *</label><input style={fieldStyle} value={form.department} onChange={set("department")} placeholder="e.g. General Surgery" /></div>
+            <div style={{ gridColumn: "span 12" }}><label style={labelStyle}>Department *</label><input style={fieldStyle} list="cert-department-options" value={form.department} onChange={set("department")} placeholder="Pick a department or type one" />
+              <datalist id="cert-department-options">{departmentOptions.map((d) => <option key={d} value={d} />)}</datalist></div>
             <div style={{ gridColumn: "span 12" }}>
               <label style={labelStyle}>Diagnosis *</label>
               <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.diagnosis} onChange={set("diagnosis")} placeholder="e.g. Right upper ureteric calculus" />

@@ -856,6 +856,20 @@ def _release_admission_beds(cursor, admission_id):
             )
 
 
+def _admission_department_info(cursor, adm) -> dict:
+    """Department / doctor the patient was admitted under (admission form), or the latest transfer's, for documents."""
+    import patient_journey
+    info = patient_journey.parse_admission_notes(adm["notes"] if "notes" in adm.keys() else "")
+    department, doctor = info.get("department"), info.get("consulting_doctor")
+    cursor.execute("SELECT to_department, to_doctor FROM doctor_patient_transfers WHERE admission_id = ? ORDER BY created_at DESC, id DESC LIMIT 1", (adm["id"],))
+    moved = cursor.fetchone()
+    if moved:
+        department = moved["to_department"] or department
+        doctor = moved["to_doctor"] or doctor
+    return {"department": department, "consulting_doctor": doctor}
+
+
+
 def _stay_paid_bills(cursor, patient_id, adm) -> dict:
     """What lab / pharmacy / the ward billed and what the patient paid during this stay (for the emergency /
     essentiality certificate): invoices by module dated inside the stay, plus confirmed lab orders and
@@ -1240,6 +1254,7 @@ def get_ip_discharge_details(db: Session, admission_id: Any):
             "payments": payment_items,
             "advances": advances,
             "paid_bills": _stay_paid_bills(cursor, patient_id, adm),
+            "admission_info": _admission_department_info(cursor, adm),
             "charges_version": charges_version,
             "status": "financial_review" if not adm["discharge_date"] else "finalised"
         }
