@@ -8935,7 +8935,20 @@ def list_unissued_medication_orders(db, patient_id, admission_id=None):
 
 
 
-def record_emar_status(db, emar_id, status, username, notes=None):
+def _parse_emar_time(value):
+    """A time typed by the nurse ('2026-11-19T20:05' or '2026-11-19 20:05[:00]', naive ward time) or None."""
+    text_value = str(value or "").strip().replace("T", " ")[:19]
+    if not text_value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text_value, fmt)
+        except ValueError:
+            continue
+    raise ValueError("The time administered is not a valid date and time.")
+
+
+def record_emar_status(db, emar_id, status, username, notes=None, administered_at=None):
     """Nurse-recorded outcome for a single scheduled dose. Only a still-pending
     dose can be recorded against -- this is what prevents double-administration
     and what stops a typo'd/stale emar_id from silently 'succeeding'. The
@@ -8962,9 +8975,13 @@ def record_emar_status(db, emar_id, status, username, notes=None):
         if record["status"] != "pending":
             raise ValueError(f"This dose is already {record['status']}; it cannot be changed.")
         now = _emar_now()
+        # The nurse can record the actual time the dose was given (never in the future).
+        given_at = _parse_emar_time(administered_at) or now
+        if given_at - now > timedelta(minutes=5):
+            raise ValueError("The time administered cannot be in the future.")
         scheduled = record["scheduled_time"]
         is_prn = emar_frequency_plan(record["frequency"], record["is_prn"])[0] == "prn" or str(record["notes"] or "").startswith("PRN")
-        if status == "given" and not is_prn and isinstance(scheduled, datetime) and scheduled - now > EMAR_EARLY_WINDOW and not notes:
+        if status == "given" and not is_prn and isinstance(scheduled, datetime) and scheduled - given_at > EMAR_EARLY_WINDOW and not notes:
             raise ValueError(
                 f"This dose is scheduled for {scheduled.strftime('%d %b %Y %H:%M')}. "
                 "Giving it more than 1 hour early needs a reason (e.g. a doctor's instruction)."
@@ -8975,7 +8992,7 @@ def record_emar_status(db, emar_id, status, username, notes=None):
             SET status = ?, administered_by = ?, administered_at = ?, notes = CASE WHEN ? IS NULL THEN notes ELSE ? END
             WHERE id = ? AND status = 'pending'
             """,
-            (status, username, now, notes, notes, emar_id),
+            (status, username, given_at if status == "given" else now, notes, notes, emar_id),
         )
         if cursor.rowcount != 1:
             raise ValueError("This dose was just recorded by someone else; refresh to see its status.")
@@ -8984,8 +9001,8 @@ def record_emar_status(db, emar_id, status, username, notes=None):
 
 
 
-def administer_emar_record(db, emar_id, username, notes=None):
-    return record_emar_status(db, emar_id, "given", username, notes)
+def administer_emar_record(db, emar_id, username, notes=None, administered_at=None):
+    return record_emar_status(db, emar_id, "given", username, notes, administered_at)
 
 
 

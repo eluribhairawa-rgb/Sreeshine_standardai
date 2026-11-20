@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Button, Select, Textarea, Input, Label, ConfirmDialog } from "../components/ui";
 import { doctorsInDepartment, useDoctorDirectory } from "../lib/doctorDirectory";
+import { FrequencyCombobox, usePrescriptionFrequencies } from "../components/FrequencyCombobox";
 import { apiFetch, reportError } from "../lib/api";
 import { formatDateTimeIST } from "../lib/format";
 import type { Notice } from "../types";
@@ -39,8 +40,15 @@ type AssignedPatient = {
   discharge_readiness?: string | null;
 };
 
+type NoteOrders = {
+  medicines: { name: string; dosage: string; frequency: string; duration: string; instructions: string }[];
+  pharmacy: { indent_no: string; status: string }[];
+  lab: { order_no: string; status: string; priority: string; tests: string[] }[];
+};
+
 type ClinicalNote = {
   id: number;
+  orders?: NoteOrders | null;
   doctor_name: string;
   subjective?: string | null;
   objective_analysis?: string | null;
@@ -113,8 +121,32 @@ export default function DoctorClinicalNotesPage({ setNotice, scopedDoctor, isNur
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  // Orders written with the note: medicines go to Pharmacy > IP Dispense, tests to Lab > Orders & Billing.
+  const [orderMeds, setOrderMeds] = useState<{ medicine_name: string; dosage: string; frequency: string; duration: string; instructions: string }[]>([]);
+  const [orderTests, setOrderTests] = useState<{ service_id: number; name: string }[]>([]);
+  const [labPriority, setLabPriority] = useState("Routine");
+  const [testSearch, setTestSearch] = useState("");
+  const [catalogue, setCatalogue] = useState<{ id: number; code: string; name: string; service_type: string }[]>([]);
+  const [medicineNames, setMedicineNames] = useState<string[]>([]);
+  const { options: frequencyOptions, add: addFrequency, remove: removeFrequency, reset: resetFrequencies } = usePrescriptionFrequencies();
 
   const selected = patients.find((p) => p.admission_id === selectedId) || null;
+
+  useEffect(() => {
+    apiFetch<{ services?: { id: number; code: string; name: string; service_type: string }[] }>("/api/diag/services?active_only=true")
+      .then((r) => setCatalogue(r.services || [])).catch(() => setCatalogue([]));
+    apiFetch<{ medicines?: { name?: string; medicine_name?: string }[] }>("/api/pharmacy/medicines?active_only=true")
+      .then((r) => setMedicineNames(Array.from(new Set((r.medicines || []).map((m) => String(m.medicine_name || m.name || "")).filter(Boolean)))))
+      .catch(() => setMedicineNames([]));
+  }, []);
+  const addOrderMed = () => setOrderMeds((prev) => [...prev, { medicine_name: "", dosage: "", frequency: "", duration: "", instructions: "" }]);
+  const testMatches = useMemo(() => {
+    const q = testSearch.trim().toLowerCase();
+    if (!q) return [];
+    return catalogue.filter((c) => !orderTests.some((t) => t.service_id === c.id) && `${c.name} ${c.code}`.toLowerCase().includes(q)).slice(0, 8);
+  }, [catalogue, testSearch, orderTests]);
+  const clearOrders = () => { setOrderMeds([]); setOrderTests([]); setLabPriority("Routine"); setTestSearch(""); };
+  const hasOrders = orderMeds.some((m) => m.medicine_name.trim()) || orderTests.length > 0;
 
   const loadPatients = async () => {
     setLoading(true);
@@ -209,18 +241,32 @@ export default function DoctorClinicalNotesPage({ setNotice, scopedDoctor, isNur
 
   const save = async () => {
     if (!selected) return;
-    if (!TEXT_KEYS.some((k) => form[k].trim())) {
-      setNotice({ type: "warning", message: "Enter at least one clinical finding before saving." });
+    if (!TEXT_KEYS.some((k) => form[k].trim()) && !hasOrders) {
+      setNotice({ type: "warning", message: "Enter at least one clinical finding (or order a medicine / test) before saving." });
       return;
     }
     setSaving(true);
     try {
-      if (editingId) {
-        await apiFetch(`/api/doctor-notes/${editingId}`, { method: "PUT", body: JSON.stringify(form) });
-      } else {
-        await apiFetch(`/api/admissions/${selected.admission_id}/doctor-notes`, { method: "POST", body: JSON.stringify(form) });
-      }
-      setNotice({ type: "success", message: `${editingId ? "Clinical note updated" : "Clinical note saved"} for ${selected.patient_name}. It now shows in the patient journey and the discharge summary.` });
+      const body = JSON.stringify({
+        ...form,
+        medicines: orderMeds.filter((m) => m.medicine_name.trim()),
+        lab_tests: orderTests.map((t) => ({ service_id: t.service_id })),
+        lab_priority: labPriority,
+      });
+      type OrderResult = { orders?: { medication?: { indent_no?: string; items?: number } | null; lab?: { order_id: number; tests: number } | null; lab_error?: string | null } };
+      const res = editingId
+        ? await apiFetch<OrderResult>(`/api/doctor-notes/${editingId}`, { method: "PUT", body })
+        : await apiFetch<OrderResult>(`/api/admissions/${selected.admission_id}/doctor-notes`, { method: "POST", body });
+      const o = res?.orders;
+      const sent = [
+        o?.medication ? `${o.medication.items || 0} medicine(s) sent to Pharmacy IP Dispense (${o.medication.indent_no})` : "",
+        o?.lab ? `${o.lab.tests} test(s) sent to Lab Orders & Billing as a draft order for billing to confirm` : "",
+      ].filter(Boolean);
+      setNotice({
+        type: o?.lab_error ? "warning" : "success",
+        message: `${editingId ? "Clinical note updated" : "Clinical note saved"} for ${selected.patient_name}.${sent.length ? ` ${sent.join("; ")}.` : " It now shows in the patient journey and the discharge summary."}${o?.lab_error ? ` The test order could not be placed: ${o.lab_error}` : ""}`,
+      });
+      clearOrders();
       setForm(EMPTY_FORM);
       setEditingId(null);
       await Promise.all([loadNotes(selected.admission_id), loadPatients()]);
@@ -324,6 +370,69 @@ export default function DoctorClinicalNotesPage({ setNotice, scopedDoctor, isNur
                   </div>
 
                   <div style={{ borderTop: "1px dashed #cbd5e1", paddingTop: 12 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#334155", textTransform: "uppercase" }}>Orders for this patient</div>
+                    <p style={{ margin: "2px 0 8px", fontSize: 12.5, color: "#64748b" }}>
+                      Medicines go straight to <strong>Pharmacy &gt; IP Dispense</strong> (and the eMAR); tests go to <strong>Lab &amp; Diagnostics &gt; Orders &amp; Billing</strong>
+                      as a draft order for billing to confirm. They are placed when you save the note{editingId ? " (only the ones added here, earlier orders are not repeated)" : ""}.
+                    </p>
+                    <datalist id="clinical-medicine-names">{medicineNames.map((n) => <option key={n} value={n} />)}</datalist>
+                    {orderMeds.map((m, i) => (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 2fr auto", gap: 8, marginBottom: 6, alignItems: "end" }}>
+                        <div><Label>Medicine</Label><Input list="clinical-medicine-names" value={m.medicine_name} onChange={(e) => setOrderMeds((p) => p.map((x, j) => (j === i ? { ...x, medicine_name: e.target.value } : x)))} placeholder="Medicine name" disabled={!canWrite || handedOver || saving} /></div>
+                        <div><Label>Dose</Label><Input value={m.dosage} onChange={(e) => setOrderMeds((p) => p.map((x, j) => (j === i ? { ...x, dosage: e.target.value } : x)))} placeholder="650 mg" disabled={!canWrite || handedOver || saving} /></div>
+                        <div>
+                          <Label>Frequency</Label>
+                          <FrequencyCombobox
+                            value={m.frequency}
+                            onChange={(val) => setOrderMeds((p) => p.map((x, j) => (j === i ? { ...x, frequency: val } : x)))}
+                            options={frequencyOptions}
+                            onAddOption={addFrequency}
+                            onDeleteOption={removeFrequency}
+                            onResetDefaults={resetFrequencies}
+                            placeholder="OD / BD / TDS"
+                          />
+                        </div>
+                        <div><Label>Duration</Label><Input value={m.duration} onChange={(e) => setOrderMeds((p) => p.map((x, j) => (j === i ? { ...x, duration: e.target.value } : x)))} placeholder="5 days" disabled={!canWrite || handedOver || saving} /></div>
+                        <div><Label>Instructions</Label><Input value={m.instructions} onChange={(e) => setOrderMeds((p) => p.map((x, j) => (j === i ? { ...x, instructions: e.target.value } : x)))} placeholder="After food" disabled={!canWrite || handedOver || saving} /></div>
+                        <Button variant="ghost" size="sm" onClick={() => setOrderMeds((p) => p.filter((_, j) => j !== i))} disabled={saving}>Remove</Button>
+                      </div>
+                    ))}
+                    {canWrite && !handedOver && <Button variant="secondary" size="sm" onClick={addOrderMed} disabled={saving}>+ Add medicine</Button>}
+
+                    <div style={{ marginTop: 14 }}>
+                      <Label>Tests / investigations</Label>
+                      {orderTests.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "4px 0 8px" }}>
+                          {orderTests.map((t) => (
+                            <span key={t.service_id} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#f0fdfa", border: "1px solid #99f6e4", borderRadius: 999, padding: "3px 10px", fontSize: 12.5, fontWeight: 600 }}>
+                              {t.name}
+                              <button type="button" onClick={() => setOrderTests((p) => p.filter((x) => x.service_id !== t.service_id))} style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b" }} aria-label={`Remove ${t.name}`}>×</button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 8 }}>
+                        <div style={{ position: "relative" }}>
+                          <Input value={testSearch} onChange={(e) => setTestSearch(e.target.value)} placeholder={catalogue.length ? "Search a test to order (e.g. CBC, Urine Culture)" : "Test catalogue not available for your login"} disabled={!canWrite || handedOver || saving || catalogue.length === 0} />
+                          {testMatches.length > 0 && (
+                            <div style={{ position: "absolute", zIndex: 20, left: 0, right: 0, top: "100%", background: "#fff", border: "1px solid #cbd5e1", borderRadius: 8, boxShadow: "0 8px 20px rgba(0,0,0,.12)", maxHeight: 240, overflowY: "auto" }}>
+                              {testMatches.map((c) => (
+                                <button key={c.id} type="button" onClick={() => { setOrderTests((p) => [...p, { service_id: c.id, name: c.name }]); setTestSearch(""); }}
+                                  style={{ display: "block", width: "100%", textAlign: "left", padding: "7px 12px", background: "none", border: "none", borderBottom: "1px solid #f1f5f9", cursor: "pointer", fontSize: 13 }}>
+                                  {c.name} <span style={{ color: "#94a3b8", fontSize: 11.5 }}>{c.code} · {c.service_type}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <Select value={labPriority} onChange={(e) => setLabPriority(e.target.value)} disabled={!canWrite || handedOver || saving}>
+                          <option value="Routine">Routine</option><option value="Urgent">Urgent</option><option value="STAT">STAT</option>
+                        </Select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px dashed #cbd5e1", paddingTop: 12 }}>
                     <div style={{ fontSize: 12, fontWeight: 800, color: "#334155", textTransform: "uppercase" }}>Discharge summary details</div>
                     <p style={{ margin: "2px 0 0", fontSize: 12.5, color: "#64748b" }}>Optional. Anything written here fills the matching section of the Discharge Summary.</p>
                   </div>
@@ -344,8 +453,8 @@ export default function DoctorClinicalNotesPage({ setNotice, scopedDoctor, isNur
                     <Button variant="primary" onClick={() => void save()} disabled={saving} style={{ background: "#00828a", borderColor: "#00828a" }}>
                       {saving ? "Saving..." : editingId ? "Update note" : "Save clinical note"}
                     </Button>
-                    {(editingId || Object.values(form).some((v) => v && v !== "not_assessed")) && (
-                      <Button variant="ghost" onClick={() => { setForm(EMPTY_FORM); setEditingId(null); }} disabled={saving}>Clear</Button>
+                    {(editingId || hasOrders || Object.values(form).some((v) => v && v !== "not_assessed")) && (
+                      <Button variant="ghost" onClick={() => { setForm(EMPTY_FORM); setEditingId(null); clearOrders(); }} disabled={saving}>Clear</Button>
                     )}
                   </div>
                 )}
@@ -423,6 +532,26 @@ export default function DoctorClinicalNotesPage({ setNotice, scopedDoctor, isNur
                         )}
                       </div>
                     </div>
+                    {n.orders && (n.orders.medicines.length > 0 || n.orders.lab.length > 0) && (
+                      <div style={{ marginTop: 8, background: "#f0fdfa", border: "1px solid #99f6e4", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+                        <strong style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.02em", color: "#0f766e" }}>Orders placed with this note</strong>
+                        {n.orders.medicines.length > 0 && (
+                          <div style={{ marginTop: 4 }}>
+                            <strong>Medicines</strong>{n.orders.pharmacy.length > 0 && <> → Pharmacy IP Dispense ({n.orders.pharmacy.map((p) => `${p.indent_no} · ${p.status}`).join(", ")})</>}
+                            <ul style={{ margin: "2px 0 0 18px", padding: 0 }}>
+                              {n.orders.medicines.map((m, i) => (
+                                <li key={i}>{[m.name, m.dosage, m.frequency, m.duration && `for ${m.duration}`, m.instructions].filter(Boolean).join(" · ")}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {n.orders.lab.map((o) => (
+                          <div key={o.order_no} style={{ marginTop: 4 }}>
+                            <strong>Tests</strong> → Lab Orders &amp; Billing ({o.order_no} · {o.status === "Draft" ? "draft, awaiting billing" : o.status} · {o.priority}): {o.tests.join(", ")}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {NOTE_LABELS.filter(([key]) => n[key]).map(([key, label]) => {
                       const v = n[key] as string;
                       return (                      <div key={label} style={{ marginTop: 6, fontSize: 13 }}>

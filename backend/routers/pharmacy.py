@@ -631,10 +631,10 @@ def emar_administer(emar_id: int, request: Request, payload: dict = Body(default
                      user: dict = Depends(require_permissions("patients.write"))):
     payload = payload or {}
     try:
-        lq.administer_emar_record(db, emar_id, user.get("username"), notes=payload.get("notes"))
+        lq.administer_emar_record(db, emar_id, user.get("username"), notes=payload.get("notes"), administered_at=payload.get("administered_at"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    log_audit_event(db, user, client_ip(request), "administer", "emar_records", str(emar_id), {})
+    log_audit_event(db, user, client_ip(request), "administer", "emar_records", str(emar_id), {"administered_at": payload.get("administered_at")})
     return {"status": "ok"}
 
 

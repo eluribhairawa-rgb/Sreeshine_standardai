@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from common import client_ip, log_audit_event
 from database import get_db
 from deps import current_hospital_id, require_permissions
+import legacy_queries as lq
 import legacy_sql
 import nurse_assignments
 import patient_journey
@@ -22,6 +23,7 @@ TEXT_FIELDS = ("subjective", "objective_analysis", "diagnosis", "treatment_plan"
                "presenting_complaints", "clinical_course", "key_investigations", "procedures", "treatment_given",
                "condition_at_discharge", "advice", "follow_up")
 MAX_FIELD = 5000
+MAX_ORDER_LINES = 30
 
 
 def _is_admin(user):
@@ -71,9 +73,81 @@ def _clean_payload(payload):
     if readiness not in READINESS:
         raise HTTPException(status_code=400, detail="Invalid discharge readiness.")
     out["discharge_readiness"] = readiness
-    if not any(out[k] for k in TEXT_FIELDS):
-        raise HTTPException(status_code=400, detail="Enter at least one clinical finding before saving.")
+    if not any(out[k] for k in TEXT_FIELDS) and not _has_orders(payload):
+        raise HTTPException(status_code=400, detail="Enter at least one clinical finding (or order a medicine / test) before saving.")
     return out
+
+
+def _has_orders(payload):
+    return any(isinstance(m, dict) and str(m.get("medicine_name") or "").strip() for m in (payload.get("medicines") or [])) or \
+        any(isinstance(t, dict) and t.get("service_id") for t in (payload.get("lab_tests") or []))
+
+
+def _clean_orders(payload):
+    """Medicines and tests the doctor ordered with this note -> ([medicine rows], [service ids], priority)."""
+    medicines = []
+    for m in (payload.get("medicines") or [])[:MAX_ORDER_LINES]:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("medicine_name") or "").strip()[:200]
+        if not name:
+            continue
+        medicines.append({
+            "medicine_name": name, "dosage": str(m.get("dosage") or "").strip()[:100], "frequency": str(m.get("frequency") or "").strip()[:100],
+            "duration": str(m.get("duration") or "").strip()[:100], "instructions": str(m.get("instructions") or "").strip()[:500] or None,
+        })
+    service_ids = []
+    for t in (payload.get("lab_tests") or [])[:MAX_ORDER_LINES]:
+        try:
+            sid = int(t.get("service_id")) if isinstance(t, dict) else None
+        except (TypeError, ValueError):
+            sid = None
+        if sid and sid not in service_ids:
+            service_ids.append(sid)
+    priority = str(payload.get("lab_priority") or "Routine").strip()
+    return medicines, service_ids, priority if priority in ("Routine", "Urgent", "STAT") else "Routine"
+
+
+def _check_service_ids(cursor, service_ids):
+    """Every ordered test must be an active catalogue service (checked before anything is saved)."""
+    if not service_ids:
+        return
+    cursor.execute("SELECT id FROM diag_services WHERE id = ANY(?) AND COALESCE(active, TRUE) = TRUE", (service_ids,))
+    found = {r["id"] for r in cursor.fetchall()}
+    missing = [i for i in service_ids if i not in found]
+    if missing:
+        raise HTTPException(status_code=400, detail="One of the selected tests is not available in the catalogue. Pick the test again.")
+
+
+def _place_medication_order(cursor, patient_id, admission_id, doctor, diagnosis, medicines, username, note_id):
+    """Medicines written in a clinical note become an IP medication order (ward indent) for Pharmacy > IP Dispense,
+    exactly like a Doctor Prescription for an admitted patient."""
+    cursor.execute(
+        """
+        INSERT INTO prescriptions (appointment_id, patient_id, doctor_name, diagnosis, advice, dispense_status, admission_id)
+        VALUES (NULL, ?, ?, ?, ?, 'ip_order', ?)
+        """,
+        (patient_id, doctor, diagnosis, f"Ordered from Doctor Clinicals note #{note_id}", admission_id),
+    )
+    prescription_id = cursor.lastrowid
+    for med in medicines:
+        cursor.execute(
+            "INSERT INTO prescription_medicines (prescription_id, medicine_name, dosage, frequency, duration, instructions, is_custom) VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (prescription_id, med["medicine_name"], med["dosage"], med["frequency"], med["duration"], med["instructions"]),
+        )
+    order = lq.create_ip_order_from_prescription(cursor, prescription_id, patient_id, admission_id, doctor, medicines, username)
+    return {"prescription_id": prescription_id, **(order or {})}
+
+
+def _place_lab_order(db, patient_id, admission_id, doctor, diagnosis, service_ids, priority, username, note_id):
+    """Tests written in a clinical note become a draft lab order on the admission: it shows in
+    Lab & Diagnostics > Orders & Billing, where it is confirmed and billed to the stay."""
+    order_id = lq.create_diag_order(db, {
+        "patient_id": patient_id, "encounter_type": "IP", "admission_id": admission_id, "referring_clinician": doctor,
+        "priority": priority, "clinical_indication": diagnosis, "notes": f"Ordered from Doctor Clinicals note #{note_id}",
+        "items": [{"service_id": sid} for sid in service_ids],
+    }, username)
+    return {"order_id": order_id}
 
 
 def _assigned_to(cursor, admission_id, doctor):
@@ -165,7 +239,10 @@ def doctor_notes_list(admission_id: int, db: Session = Depends(get_db), user: di
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="Admission not found.")
         cursor.execute("SELECT * FROM doctor_clinical_notes WHERE admission_id = ? ORDER BY created_at DESC, id DESC", (admission_id,))
-        return {"notes": [_serialize(r) for r in cursor.fetchall()]}
+        notes = [_serialize(r) for r in cursor.fetchall()]
+        for n in notes:
+            n["orders"] = patient_journey.clinical_note_orders(cursor, n["id"])
+        return {"notes": notes}
 
 
 @router.post("/admissions/{admission_id}/doctor-notes")
@@ -173,6 +250,7 @@ def doctor_notes_create(admission_id: int, request: Request, payload: dict = Bod
                         user: dict = Depends(require_permissions("patients.write")), hospital_id: int = Depends(current_hospital_id)):
     role, doctor = _writer(user)
     data = _clean_payload(payload)
+    medicines, service_ids, priority = _clean_orders(payload)
     with legacy_sql.get_connection(db) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, patient_id, discharge_date FROM admissions WHERE id = ? FOR UPDATE", (admission_id,))
@@ -199,9 +277,20 @@ def doctor_notes_create(admission_id: int, request: Request, payload: dict = Bod
             tuple(values),
         )
         note_id = cursor.fetchone()[0]
+        _check_service_ids(cursor, service_ids)
+        medication = _place_medication_order(cursor, adm["patient_id"], admission_id, note_doctor, data["diagnosis"], medicines, user.get("username"), note_id) if medicines else None
         conn.commit()
-    log_audit_event(db, user, client_ip(request), "create", "doctor_clinical_notes", str(note_id), {"admission_id": admission_id})
-    return {"status": "ok", "note_id": note_id}
+        patient_id = adm["patient_id"]
+    orders = {"medication": medication, "lab": None, "lab_error": None}
+    if service_ids:
+        try:
+            orders["lab"] = {**_place_lab_order(db, patient_id, admission_id, note_doctor, data["diagnosis"], service_ids, priority, user.get("username"), note_id),
+                             "tests": len(service_ids)}
+        except ValueError as exc:
+            orders["lab_error"] = str(exc)
+    log_audit_event(db, user, client_ip(request), "create", "doctor_clinical_notes", str(note_id),
+                    {"admission_id": admission_id, "medicines": len(medicines), "tests": len(service_ids)})
+    return {"status": "ok", "note_id": note_id, "orders": orders}
 
 
 @router.put("/doctor-notes/{note_id}")
@@ -209,6 +298,7 @@ def doctor_notes_update(note_id: int, request: Request, payload: dict = Body(...
                         user: dict = Depends(require_permissions("patients.write"))):
     role, doctor = _writer(user)
     data = _clean_payload(payload)
+    medicines, service_ids, priority = _clean_orders(payload)
     with legacy_sql.get_connection(db) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -228,9 +318,22 @@ def doctor_notes_update(note_id: int, request: Request, payload: dict = Body(...
             f"UPDATE doctor_clinical_notes SET {assignments}, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (*(data[k] for k in TEXT_FIELDS), data["discharge_readiness"], user.get("username"), note_id),
         )
+        # Medicines / tests sent with an edit are NEW orders (already-placed ones are never repeated).
+        _check_service_ids(cursor, service_ids)
+        medication = _place_medication_order(cursor, note["patient_id"], note["admission_id"], note["doctor_name"], data["diagnosis"] or note["diagnosis"],
+                                             medicines, user.get("username"), note_id) if medicines else None
         conn.commit()
-    log_audit_event(db, user, client_ip(request), "update", "doctor_clinical_notes", str(note_id), {"admission_id": note["admission_id"]})
-    return {"status": "ok"}
+        patient_id, admission_id, note_doctor = note["patient_id"], note["admission_id"], note["doctor_name"]
+    orders = {"medication": medication, "lab": None, "lab_error": None}
+    if service_ids:
+        try:
+            orders["lab"] = {**_place_lab_order(db, patient_id, admission_id, note_doctor, data["diagnosis"] or note["diagnosis"], service_ids, priority, user.get("username"), note_id),
+                             "tests": len(service_ids)}
+        except ValueError as exc:
+            orders["lab_error"] = str(exc)
+    log_audit_event(db, user, client_ip(request), "update", "doctor_clinical_notes", str(note_id),
+                    {"admission_id": note["admission_id"], "medicines": len(medicines), "tests": len(service_ids)})
+    return {"status": "ok", "orders": orders}
 
 
 @router.get("/admissions/{admission_id}/doctor-transfers")

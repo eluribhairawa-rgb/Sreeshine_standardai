@@ -94,6 +94,9 @@ type IpCartItem = {
   route?: string;
   frequency?: string;
   stock_source: "CASH" | "INSURANCE";
+  // Set when the line comes from a doctor's ward order: issuing it also marks that order line as issued.
+  indent_id?: number;
+  indent_item_id?: number;
 };
 
 export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
@@ -146,6 +149,8 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
 
   // Direct IP Dispense Cart
   const [ipCart, setIpCart] = useState<IpCartItem[]>([]);
+  // The ward-order line the pharmacist is issuing through Direct IP Dispense (links the cart line to it).
+  const [pendingIndentLink, setPendingIndentLink] = useState<{ indent_id: number; indent_item_id: number; medicine_name: string } | null>(null);
   const [submittingDirect, setSubmittingDirect] = useState(false);
 
   // Print Slip state for Direct Dispense
@@ -554,9 +559,11 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
           route: directRoute,
           frequency: directFrequency,
           stock_source: directStockSource,
+          ...(pendingIndentLink ? { indent_id: pendingIndentLink.indent_id, indent_item_id: pendingIndentLink.indent_item_id } : {}),
         },
       ]);
     }
+    setPendingIndentLink(null);
 
     // Reset medicine form
     setSelectedStockBatch(null);
@@ -615,10 +622,43 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
         })),
       };
 
-      const res = await apiFetch<any>("/api/pharmacy/dispense", {
-        method: "POST",
-        body: JSON.stringify(payload),
+      // Lines that come from a ward order are issued against that order (so it shows as issued); the rest are plain dispenses.
+      const linked = ipCart.filter((c) => c.indent_id && c.indent_item_id);
+      const plain = ipCart.filter((c) => !(c.indent_id && c.indent_item_id));
+      const lineOf = (c: IpCartItem) => ({
+        batch_id: c.batch_id,
+        pharmacy_inventory_id: c.batch_id,
+        medicine_name: c.medicine_name,
+        quantity: c.quantity,
+        unit_price: c.unit_price,
+        price: c.unit_price,
+        dose: c.dose || "1 dose",
+        route: c.route || "Oral",
+        frequency: c.frequency || "OD",
       });
+      let res: any = null;
+      const indentIds = Array.from(new Set(linked.map((c) => c.indent_id as number)));
+      for (const indentId of indentIds) {
+        const lines = linked.filter((c) => c.indent_id === indentId);
+        res = await apiFetch<any>(`/api/pharmacy/ward-indents/${indentId}/dispense`, {
+          method: "POST",
+          body: JSON.stringify({
+            patient_id: selectedPatient.patient_id,
+            admission_id: selectedPatient.admission_id || undefined,
+            indent_id: indentId,
+            billing_type: "IPD_RUNNING",
+            stock_source: directStockSource,
+            ...(directStockSource === "INSURANCE" ? { payment_mode: "insurance" } : {}),
+            items: lines.map((c) => ({ ...lineOf(c), indent_item_id: c.indent_item_id })),
+          }),
+        });
+      }
+      if (plain.length > 0) {
+        res = await apiFetch<any>("/api/pharmacy/dispense", {
+          method: "POST",
+          body: JSON.stringify({ ...payload, items: plain.map(lineOf) }),
+        });
+      }
 
       setDispensedSlipData({
         patient: selectedPatient,
@@ -645,6 +685,7 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
       setDirectPrintModalOpen(true);
       setIpCart([]);
       void loadStock();
+      void loadIndents();
 
       // Refresh running balance
       const key = selectedPatient.admission_id || selectedPatient.patient_id;
@@ -766,6 +807,49 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
   // -------------------------------------------------------------
   // TAB 2 Actions: Ward Indents
   // -------------------------------------------------------------
+  // "Issue Medicine" on a ward order: go to Direct IP Dispense and pre-fill the medicine, dose, route, frequency and
+  // quantity from the order, picking the in-stock batch (earliest expiry) when the medicine is available.
+  const handleIssueViaDirect = (indent: WardIndent, item: WardIndentItem) => {
+    const pendingQty = Math.max(1, item.quantity_ordered - (item.quantity_dispensed || 0));
+    const rawName = item.medicine_name.toLowerCase().trim();
+    const candidates = stockBatches
+      .filter((b) => {
+        const bMed = b.medicine_name.toLowerCase();
+        return (b.qty_available || 0) > 0 && (bMed === rawName || bMed.includes(rawName) || rawName.includes(bMed));
+      })
+      .sort((a, b) => {
+        const dateA = a.expiry_date ? new Date(a.expiry_date).getTime() : Infinity;
+        const dateB = b.expiry_date ? new Date(b.expiry_date).getTime() : Infinity;
+        return dateA - dateB;
+      });
+    const batch = candidates[0] || null;
+
+    setPendingIndentLink({ indent_id: indent.id, indent_item_id: item.id, medicine_name: item.medicine_name });
+    setDirectDose(item.dose || "");
+    setDirectRoute(item.route || "");
+    setDirectFrequency(item.frequency || "");
+    if (batch) {
+      setSelectedStockBatch(batch);
+      setMedSearchQuery(batch.medicine_name);
+      setDirectQtyInput(String(Math.min(pendingQty, batch.qty_available)));
+      setShowMedDropdown(false);
+      setNotice({
+        type: batch.qty_available < pendingQty ? "warning" : "info",
+        message: batch.qty_available < pendingQty
+          ? `${batch.medicine_name}: only ${batch.qty_available} in stock (batch ${batch.batch_no}) against ${pendingQty} ordered. Check the quantity, add it to the cart and dispense.`
+          : `${batch.medicine_name} (batch ${batch.batch_no}) filled from the ward order. Check the details, add it to the cart and dispense.`,
+      });
+    } else {
+      setSelectedStockBatch(null);
+      setMedSearchQuery(item.medicine_name);
+      setDirectQtyInput(String(pendingQty));
+      setShowMedDropdown(true);
+      setNotice({ type: "warning", message: `${item.medicine_name} is not in stock. Search for a substitute below, or add the stock in Inventory first.` });
+    }
+    setActiveTab("direct");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const handleOpenIssueModal = (indent: WardIndent, item: WardIndentItem) => {
     setSelectedIndent(indent);
     setActiveIndentItem(item);
@@ -1926,7 +2010,7 @@ export default function PharmacyIpDispense({ setNotice, onNavigate }: Props) {
                                         type="button"
                                         size="sm"
                                         style={{ background: "#00828a", borderColor: "#00828a", color: "#ffffff", fontWeight: 700 }}
-                                        onClick={() => handleOpenIssueModal(ind, it)}
+                                        onClick={() => handleIssueViaDirect(ind, it)}
                                       >
                                         Issue Medicine
                                       </Button>

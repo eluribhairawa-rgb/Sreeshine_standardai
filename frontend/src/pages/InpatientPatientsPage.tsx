@@ -412,6 +412,23 @@ export default function InpatientPatientsPage({ setNotice, onNavigate }: Props) 
               <div><strong>Ward / Room / Bed:</strong> {viewPatient.ward} / {viewPatient.room_no} / {viewPatient.bed_no}</div>
               <div><strong>Rate / Day:</strong> ₹{Number(viewPatient.amount_per_day).toFixed(2)}</div>
               <div><strong>Allocated:</strong> {new Date(viewPatient.allocated_at).toLocaleString()}</div>
+              {(() => {
+                // Same counting as the discharge bill: a started day counts as a day, minimum 1.
+                const start = new Date(viewPatient.allocated_at).getTime();
+                if (Number.isNaN(start)) return null;
+                const elapsedMs = Math.max(0, Date.now() - start);
+                const billedDays = Math.max(1, Math.ceil(elapsedMs / 86400000));
+                const fullDays = Math.floor(elapsedMs / 86400000);
+                const hours = Math.floor((elapsedMs % 86400000) / 3600000);
+                const rate = Number(viewPatient.amount_per_day) || 0;
+                return (
+                  <>
+                    <div><strong>Current day of admission:</strong> Day {billedDays}</div>
+                    <div><strong>Stay so far:</strong> {fullDays} day{fullDays === 1 ? "" : "s"} {hours} hr{hours === 1 ? "" : "s"}</div>
+                    {rate > 0 && <div><strong>Bed charge so far:</strong> ₹{(rate * billedDays).toFixed(2)} ({billedDays} day{billedDays === 1 ? "" : "s"} × ₹{rate.toFixed(2)})</div>}
+                  </>
+                );
+              })()}
             </div>
             <div>
               <h4 style={{ margin: "6px 0" }}>Admission Notes</h4>

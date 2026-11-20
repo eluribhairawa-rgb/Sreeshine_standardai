@@ -62,6 +62,45 @@ def _parse_dt(value):
         return None
 
 
+def clinical_note_orders(cursor, note_id):
+    """Medicines and tests ordered with a Doctor Clinicals note (placed by routers/doctor_notes.py, tagged with the
+    note number), with where they went: the Pharmacy IP Dispense order and the Lab Orders & Billing order."""
+    tag = f"Ordered from Doctor Clinicals note #{note_id}"
+    medicines, pharmacy = [], []
+    cursor.execute("SELECT id FROM prescriptions WHERE advice = ? ORDER BY id", (tag,))
+    for rx in cursor.fetchall():
+        cursor.execute("SELECT medicine_name, dosage, frequency, duration, instructions FROM prescription_medicines WHERE prescription_id = ? ORDER BY id", (rx["id"],))
+        medicines.extend({"name": m["medicine_name"], "dosage": m["dosage"] or "", "frequency": m["frequency"] or "", "duration": m["duration"] or "",
+                          "instructions": m["instructions"] or ""} for m in cursor.fetchall())
+        cursor.execute("SELECT indent_no, status FROM ward_indents WHERE prescription_id = ? ORDER BY id DESC LIMIT 1", (rx["id"],))
+        ind = cursor.fetchone()
+        if ind:
+            pharmacy.append({"indent_no": ind["indent_no"], "status": (ind["status"] or "").replace("_", " ").title()})
+    lab = []
+    cursor.execute("SELECT id, order_no, status, priority FROM diag_orders WHERE notes = ? ORDER BY id", (tag,))
+    for o in cursor.fetchall():
+        cursor.execute("SELECT service_name FROM diag_order_items WHERE order_id = ? AND cancelled_at IS NULL ORDER BY id", (o["id"],))
+        lab.append({"order_no": o["order_no"], "status": (o["status"] or "").title(), "priority": o["priority"],
+                    "tests": [r["service_name"] for r in cursor.fetchall()]})
+    if not (medicines or lab):
+        return None
+    return {"medicines": medicines, "pharmacy": pharmacy, "lab": lab}
+
+
+def orders_summary(orders):
+    """One-line text of clinical_note_orders() for the timeline / note history."""
+    if not orders:
+        return ""
+    parts = []
+    if orders["medicines"]:
+        meds = ", ".join(" ".join(x for x in (m["name"], m["dosage"], m["frequency"], f"x {m['duration']}" if m["duration"] else "") if x) for m in orders["medicines"])
+        where = ", ".join(f"{p['indent_no']} ({p['status']})" for p in orders["pharmacy"])
+        parts.append(f"Medicines ordered: {meds}" + (f" → Pharmacy IP Dispense {where}" if where else ""))
+    for o in orders["lab"]:
+        parts.append(f"Tests ordered: {', '.join(o['tests'])} → Lab order {o['order_no']} ({o['status']})")
+    return " · ".join(parts)
+
+
 def _pretty_dt(value):
     """'27 Oct 2026, 04:23 PM' for the timeline detail panels."""
     dt = _parse_dt(value)
@@ -154,6 +193,9 @@ def _ip_stay_events(cursor, patient_id, admission_id, admission, beds, window_st
         summary = [_dr(n["doctor_name"]) + (f" (entered by {'nurse' if n.get('entered_role') == 'nurse' else 'staff'} {n['created_by']})" if n.get("entered_role") in ("nurse", "staff") else ""), f"Diagnosis: {n['diagnosis']}" if n["diagnosis"] else "",
                    READY.get(n["discharge_readiness"], ""),
                    (n["objective_analysis"] or n["subjective"] or "")[:140]]
+        note_orders = clinical_note_orders(cursor, n["id"])
+        if note_orders:
+            summary.append(orders_summary(note_orders))
         events.append({"date": d, "time": t, "type": "doctor_note", "title": "Doctor clinical note",
                         "subtitle": " · ".join(x for x in summary if x), "charge": None, "received": None,
                         "clinical_note": {
@@ -165,6 +207,8 @@ def _ip_stay_events(cursor, patient_id, admission_id, admission, beds, window_st
                             "treatment_given": n.get("treatment_given") or "", "condition_at_discharge": n.get("condition_at_discharge") or "",
                             "advice": n.get("advice") or "", "follow_up": n.get("follow_up") or "",
                             "discharge_readiness": READY.get(n["discharge_readiness"], "") or "Not assessed",
+                            "medicines_ordered": orders_summary({**note_orders, "lab": []}) .replace("Medicines ordered: ", "") if note_orders and note_orders["medicines"] else "",
+                            "tests_ordered": " · ".join(f"{', '.join(o['tests'])} → Lab order {o['order_no']} ({o['status']})" for o in note_orders["lab"]) if note_orders else "",
                         }})
 
     cursor.execute("SELECT * FROM patient_vitals WHERE patient_id = ? AND admission_id = ? ORDER BY COALESCE(recorded_at, record_time, created_at)",
@@ -185,16 +229,41 @@ def _ip_stay_events(cursor, patient_id, admission_id, admission, beds, window_st
                                                            f"Plan: {n['treatment_plan']}" if n["treatment_plan"] else ""] if p),
                         "charge": None, "received": None})
 
+    # Lab / imaging orders raised for the stay (including drafts still waiting for billing to confirm them).
+    cursor.execute("SELECT * FROM diag_orders WHERE admission_id = ? AND COALESCE(status, '') <> 'cancelled' ORDER BY created_at, id", (admission_id,))
+    for o in _all(cursor):
+        cursor.execute("SELECT service_name, amount FROM diag_order_items WHERE order_id = ? AND cancelled_at IS NULL ORDER BY id", (o["id"],))
+        tests = _all(cursor)
+        d, t = _split_dt(o["created_at"])
+        status = (o["status"] or "").title()
+        events.append({"date": d, "time": t, "type": "lab_ordered", "title": "Lab tests ordered",
+                        "subtitle": " · ".join(x for x in [o["order_no"], status + (" - awaiting billing" if o["status"] == "draft" else ""),
+                                                           ", ".join(r["service_name"] for r in tests)] if x),
+                        "charge": None, "received": None,
+                        "details": _details(("Order no", o["order_no"]), ("Status", status + (" (billing has not confirmed it yet)" if o["status"] == "draft" else "")),
+                                            ("Priority", o["priority"]), ("Ordered by", _dr(o["referring_clinician"]) if o.get("referring_clinician") else o.get("created_by")),
+                                            ("Indication", o.get("clinical_indication")), ("Notes", o.get("notes")),
+                                            *[(f"Test {i + 1}", r["service_name"]) for i, r in enumerate(tests)])})
+
     cursor.execute("SELECT * FROM ward_indents WHERE patient_id = ? AND admission_id = ? ORDER BY created_at", (patient_id, admission_id))
     for ind in _all(cursor):
         cursor.execute("SELECT medicine_name, dose, frequency, route FROM ward_indent_items WHERE indent_id = ? AND COALESCE(status, '') <> 'cancelled' ORDER BY id",
                        (ind["id"],))
         meds = [" ".join(str(x) for x in (m["medicine_name"], m["dose"], m["frequency"]) if x) for m in _all(cursor)]
         d, t = _split_dt(ind["created_at"])
+        cursor.execute("SELECT medicine_name, dose, frequency, route, quantity_ordered, quantity_dispensed, status FROM ward_indent_items WHERE indent_id = ? AND COALESCE(status, '') <> 'cancelled' ORDER BY id",
+                       (ind["id"],))
+        lines = _all(cursor)
         events.append({"date": d, "time": t, "type": "medication_order", "title": "Ward medication order",
                         "subtitle": " · ".join(p for p in [ind["indent_no"], (ind["status"] or "").title(),
                                                            _dr(ind["doctor_name"]),
-                                                           ", ".join(meds)] if p), "charge": None, "received": None})
+                                                           ", ".join(meds)] if p), "charge": None, "received": None,
+                        "details": _details(("Order no", ind["indent_no"]), ("Status", (ind["status"] or "").replace("_", " ").title()),
+                                            ("Ordered by", _dr(ind["doctor_name"])),
+                                            *[(f"Medicine {i + 1}", " · ".join(str(x) for x in (l["medicine_name"], l["dose"], l["frequency"], l["route"],
+                                                                                                 f"Qty {l['quantity_ordered']}",
+                                                                                                 f"Issued {l['quantity_dispensed'] or 0}") if x))
+                                              for i, l in enumerate(lines)])})
 
     cursor.execute("SELECT * FROM ot_surgeries WHERE patient_id = ? AND scheduled_start >= ? AND scheduled_start <= ? ORDER BY scheduled_start",
                    (patient_id, f"{d0} 00:00:00", f"{d1} 23:59:59"))

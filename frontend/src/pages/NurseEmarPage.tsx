@@ -128,6 +128,12 @@ function dueState(row: EmarRow, nowMs: number): { label: string; cls: string } |
   return { label: "Upcoming", cls: "diag-badge-muted" };
 }
 
+function toLocalInput(ms: number) {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function formatTime(value?: string) {
   if (!value) return "-";
   const d = new Date(value);
@@ -164,6 +170,8 @@ export default function NurseEmarPage({ setNotice }: Props) {
   const [tick, setTick] = useState(Date.now());
   const [reasonTarget, setReasonTarget] = useState<{ row: EmarRow; action: DoseAction; early?: boolean } | null>(null);
   const [reasonText, setReasonText] = useState("");
+  // Time the nurse gives for an Administer confirmation (local wall-clock 'YYYY-MM-DDTHH:mm').
+  const [doseTime, setDoseTime] = useState("");
 
   useEffect(() => {
     const id = window.setInterval(() => setTick(Date.now()), 60000);
@@ -303,16 +311,16 @@ export default function NurseEmarPage({ setNotice }: Props) {
     );
   }, [inpatients, search, myPatientsOnly, assignedNurses]);
 
-  const submitDose = async (row: EmarRow, action: DoseAction, notes?: string) => {
+  const submitDose = async (row: EmarRow, action: DoseAction, notes?: string, administeredAt?: string) => {
     setBusyId(row.id);
     try {
-      const body = JSON.stringify(notes ? { notes } : {});
+      const body = JSON.stringify({ ...(notes ? { notes } : {}), ...(action === "given" && administeredAt ? { administered_at: administeredAt } : {}) });
       if (action === "given") {
         await apiFetch(`/api/emar/${row.id}/administer`, { method: "POST", body });
       } else {
         await apiFetch(`/api/emar/${row.id}/status`, { method: "POST", body: JSON.stringify({ status: action, ...(notes ? { notes } : {}) }) });
       }
-      setNotice({ type: "success", message: `${row.medicine_name} marked ${action}.` });
+      setNotice({ type: "success", message: action === "given" ? `${row.medicine_name} marked as administered${administeredAt ? ` at ${formatTime(administeredAt)}` : ""}.` : `${row.medicine_name} marked ${action}.` });
       setReasonTarget(null);
       setReasonText("");
       if (selected) await loadEmar(selected, status);
@@ -326,13 +334,10 @@ export default function NurseEmarPage({ setNotice }: Props) {
 
   const act = (row: EmarRow, action: DoseAction) => {
     // Held/refused/missed always need a reason; giving a scheduled dose more than an hour early does too.
-    const early = action === "given" && !isPrn(row) && new Date(row.scheduled_time).getTime() - nowMs > EARLY_WINDOW_MS;
-    if (action !== "given" || early) {
-      setReasonTarget({ row, action, early });
-      setReasonText("");
-      return;
-    }
-    void submitDose(row, action);
+    // Administer asks for the time the dose was given, then confirms it as completed. Held / refused / missed need a reason.
+    setReasonTarget({ row, action, early: false });
+    setReasonText("");
+    if (action === "given") setDoseTime(toLocalInput(nowMs));
   };
 
   const confirmDiscontinue = async () => {
@@ -541,25 +546,51 @@ export default function NurseEmarPage({ setNotice }: Props) {
                 </div>
               )}
 
-              {reasonTarget && (
-                <div className="diag-form-grid" style={{ marginTop: "1rem" }}>
-                  <div className="diag-form-full">
-                    <Label>
-                      {reasonTarget.early
-                        ? `${reasonTarget.row.medicine_name} is scheduled for ${formatTime(reasonTarget.row.scheduled_time)} - reason for giving it early`
-                        : `Mark ${reasonTarget.row.medicine_name} (${formatTime(reasonTarget.row.scheduled_time)}) as ${reasonTarget.action} - reason`}
-                    </Label>
-                    <Textarea value={reasonText} onChange={(e) => setReasonText(e.target.value)}
-                      placeholder={reasonTarget.early ? "e.g. Doctor advised to give now" : reasonTarget.action === "held" ? "e.g. BP 90/60, held per doctor" : reasonTarget.action === "refused" ? "e.g. Patient refused, counselled" : "e.g. Patient away for scan"} />
+              {reasonTarget && (() => {
+                const isGiven = reasonTarget.action === "given";
+                const givenMs = doseTime ? new Date(doseTime).getTime() : NaN;
+                const scheduledMs = new Date(reasonTarget.row.scheduled_time).getTime();
+                const early = isGiven && !isPrn(reasonTarget.row) && Number.isFinite(givenMs) && scheduledMs - givenMs > EARLY_WINDOW_MS;
+                const future = isGiven && Number.isFinite(givenMs) && givenMs - nowMs > 5 * 60 * 1000;
+                const needsReason = !isGiven || early;
+                const canConfirm = busyId !== reasonTarget.row.id && (!isGiven || (Number.isFinite(givenMs) && !future)) && (!needsReason || !!reasonText.trim());
+                return (
+                  <Modal open onClose={() => setReasonTarget(null)} title={isGiven ? "Administer medicine" : `Mark dose ${reasonTarget.action}`}>
+                  <div className="diag-form-grid" style={{ padding: "0.25rem 0" }}>
+                    <div className="diag-form-full">
+                      <strong>
+                        {isGiven
+                          ? `Administer ${reasonTarget.row.medicine_name} (scheduled ${formatTime(reasonTarget.row.scheduled_time)})`
+                          : `Mark ${reasonTarget.row.medicine_name} (${formatTime(reasonTarget.row.scheduled_time)}) as ${reasonTarget.action}`}
+                      </strong>
+                    </div>
+                    {isGiven && (
+                      <div className="diag-form-full" style={{ maxWidth: 320 }}>
+                        <Label>Time administered</Label>
+                        <Input type="datetime-local" value={doseTime} max={toLocalInput(nowMs)} onChange={(e) => setDoseTime(e.target.value)} />
+                        {future && <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 4 }}>The time cannot be in the future.</div>}
+                      </div>
+                    )}
+                    <div className="diag-form-full">
+                      <Label>
+                        {isGiven
+                          ? (early ? "Reason for giving it early (required)" : "Notes (optional)")
+                          : "Reason (required)"}
+                      </Label>
+                      <Textarea value={reasonText} onChange={(e) => setReasonText(e.target.value)}
+                        placeholder={isGiven ? (early ? "e.g. Doctor advised to give now" : "e.g. Taken with food") : reasonTarget.action === "held" ? "e.g. BP 90/60, held per doctor" : reasonTarget.action === "refused" ? "e.g. Patient refused, counselled" : "e.g. Patient away for scan"} />
+                    </div>
+                    <div className="diag-form-full">
+                      <Button variant="primary" disabled={!canConfirm}
+                        onClick={() => void submitDose(reasonTarget.row, reasonTarget.action, reasonText.trim() || undefined, isGiven ? doseTime : undefined)}>
+                        {isGiven ? "Confirm as completed" : `Confirm ${reasonTarget.action}`}
+                      </Button>
+                      <Button variant="ghost" onClick={() => setReasonTarget(null)}>Cancel</Button>
+                    </div>
                   </div>
-                  <div className="diag-form-full">
-                    <Button variant="primary" disabled={busyId === reasonTarget.row.id || !reasonText.trim()} onClick={() => void submitDose(reasonTarget.row, reasonTarget.action, reasonText.trim())}>
-                      Confirm {reasonTarget.action === "given" ? "administered" : reasonTarget.action}
-                    </Button>
-                    <Button variant="ghost" onClick={() => setReasonTarget(null)}>Cancel</Button>
-                  </div>
-                </div>
-              )}
+                  </Modal>
+                );
+              })()}
 
               {discontinueTarget && (
                 <div className="diag-form-grid" style={{ marginTop: "1rem" }}>

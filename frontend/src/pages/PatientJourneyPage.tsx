@@ -57,7 +57,7 @@ type JourneyEvent = {
   invoice_no?: string | null;
   prescription?: JourneyPrescription;
   clinical_note?: { id: number; doctor: string; subjective: string; objective_analysis: string; diagnosis: string; treatment_plan: string; prognosis: string; discharge_readiness: string;
-    presenting_complaints?: string; clinical_course?: string; key_investigations?: string; procedures?: string; treatment_given?: string; condition_at_discharge?: string; advice?: string; follow_up?: string };
+    presenting_complaints?: string; clinical_course?: string; medicines_ordered?: string; tests_ordered?: string; key_investigations?: string; procedures?: string; treatment_given?: string; condition_at_discharge?: string; advice?: string; follow_up?: string };
 };
 
 type JourneyPrescription = {
@@ -139,7 +139,7 @@ function eventDotColor(type: string) {
   if (type === "prescription") return "#2563eb";
   if (type === "pharmacy_issued") return "#ea580c";
   if (type === "pharmacy_returned") return "#d97706";
-  if (type === "lab_bill" || type === "lab_collected" || type === "imaging_completed" || type === "report_released") return "#9333ea";
+  if (type === "lab_bill" || type === "lab_collected" || type === "imaging_completed" || type === "report_released" || type === "lab_ordered") return "#9333ea";
   return "#0d9488";
 }
 
@@ -151,7 +151,7 @@ const EVENT_DEPARTMENTS: Record<string, string> = {
   advance: "Billing", doctor_note: "Doctor Rounds", doctor_transfer: "Doctor Rounds", bed_allocated: "Bed & Ward", bed_released: "Bed & Ward", doctor_round: "Doctor Rounds", observation_note: "Doctor Rounds",
   medication_order: "Pharmacy", surgery: "Surgery",
   prescription: "Consultation", pharmacy_issued: "Pharmacy", pharmacy_returned: "Pharmacy",
-  lab_bill: "Diagnostics", lab_collected: "Diagnostics", imaging_completed: "Diagnostics", report_released: "Diagnostics",
+  lab_bill: "Diagnostics", lab_ordered: "Diagnostics", lab_collected: "Diagnostics", imaging_completed: "Diagnostics", report_released: "Diagnostics",
   critical_alert: "Diagnostics", critical_ack: "Diagnostics", certificate: "Discharge",
 };
 
@@ -894,6 +894,7 @@ export default function PatientJourneyPage({ setNotice, onNavigate, selectedPati
                                 ["Presenting complaints", e.clinical_note.presenting_complaints], ["Clinical course", e.clinical_note.clinical_course], ["Key investigations", e.clinical_note.key_investigations],
                                 ["Procedures / surgery", e.clinical_note.procedures], ["Treatment given", e.clinical_note.treatment_given], ["Condition at discharge", e.clinical_note.condition_at_discharge],
                                 ["Advice", e.clinical_note.advice], ["Follow-up", e.clinical_note.follow_up],
+                                ["Medicines ordered", e.clinical_note.medicines_ordered || ""], ["Tests ordered", e.clinical_note.tests_ordered || ""],
                               ] as [string, string][]).filter(([, v]) => v).map(([label, v]) => (
                                 <div key={label}><strong>{label}:</strong> <span style={{ whiteSpace: "pre-wrap" }}>{v}</span></div>
                               ))}
