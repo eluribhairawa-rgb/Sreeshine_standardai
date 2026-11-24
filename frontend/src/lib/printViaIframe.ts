@@ -1,5 +1,5 @@
 import { PRINT_BRAND_HEADER_DATA_URI } from "./printBrand";
-import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveWatermark, getBranding } from "./branding";
+import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveLogos, getActiveWatermark, getBranding, getDocumentCategory } from "./branding";
 
 /**
  * printViaIframe – shared print utility
@@ -90,7 +90,9 @@ function getPrintTitleFontSizePt(title: string): number {
  * (alignment, offsets, auto-fit) from Branding & Templates. */
 function buildBrandRowHtml(): string {
   const b = getBranding();
-  if (!b || (!b.logo?.data_uri && !b.hospital_title)) {
+  const activeLogos = getActiveLogos();
+  const hasLogos = activeLogos.length > 0 || !!b?.logo?.data_uri;
+  if (!b || (!hasLogos && !b.hospital_title)) {
     return `<div class="hospai-shared-brand-row" style="padding: 2.5mm 0;">
         <img class="hospai-shared-brand-logo" src="${PRINT_BRAND_HEADER_DATA_URI}" alt="HospAI, Pharmacy and Diagnostic" />
       </div>`;
@@ -107,16 +109,70 @@ function buildBrandRowHtml(): string {
     : `<div style="font: 800 ${fontSizePt}pt Arial, Helvetica, sans-serif; color: #000; text-transform: uppercase; line-height: 1.25; letter-spacing: -0.2px;">${escapeBrandText(titleText)}</div>`;
   const titleHtml = `<div style="flex: 1; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1mm;">${titleContent}</div>`;
 
-  if (!b.logo?.data_uri) {
+  if (!hasLogos) {
     return `<div class="hospai-shared-brand-row" style="align-items: center; justify-content: center; min-height: auto; padding: 2.5mm 0;">
       ${titleHtml}
     </div>`;
   }
 
-  const [w, h] = fitMm(b.logo.width_px, b.logo.height_px, b.logo_box_mm[0], b.logo_box_mm[1], b.auto_fit_scaling);
-  // Prevent any negative Y offset from shifting the logo past the top boundary
+  const renderLogo = (logoDataUri: string, wPx: number | null, hPx: number | null, ox: number, oy: number, autoFit: boolean, alt: string) => {
+    const [w, h] = fitMm(wPx, hPx, b.logo_box_mm[0], b.logo_box_mm[1], autoFit);
+    const safeOy = Math.max(oy, -2.5);
+    return {
+      w,
+      h,
+      html: `<img src="${logoDataUri}" alt="${escapeBrandText(alt)}" style="display: block; width: ${w.toFixed(2)}mm; height: ${h.toFixed(2)}mm; max-width: 100%; object-fit: contain; position: relative; left: ${ox}mm; top: ${safeOy}mm;" />`,
+    };
+  };
+
+  if (activeLogos.length > 0) {
+    const leftLogo = activeLogos.find((l) => l.alignment === "left" && l.data_uri);
+    const rightLogo = activeLogos.find((l) => l.alignment === "right" && l.data_uri);
+    const centerLogo = activeLogos.find((l) => l.alignment === "center" && l.data_uri);
+
+    if (leftLogo?.data_uri && rightLogo?.data_uri) {
+      const l = renderLogo(leftLogo.data_uri, leftLogo.width_px, leftLogo.height_px, leftLogo.offset_x_mm, leftLogo.offset_y_mm, leftLogo.auto_fit_scaling, leftLogo.name || titleText);
+      const r = renderLogo(rightLogo.data_uri, rightLogo.width_px, rightLogo.height_px, rightLogo.offset_x_mm, rightLogo.offset_y_mm, rightLogo.auto_fit_scaling, rightLogo.name || titleText);
+      return `<div class="hospai-shared-brand-row" style="align-items: center; justify-content: space-between; min-height: auto; gap: 3mm; padding: 2.5mm 0;">
+        <div style="flex-shrink: 0; width: ${l.w.toFixed(2)}mm; display: flex; align-items: center; justify-content: flex-start; overflow: visible;">${l.html}</div>
+        ${titleHtml}
+        <div style="flex-shrink: 0; width: ${r.w.toFixed(2)}mm; display: flex; align-items: center; justify-content: flex-end; overflow: visible;">${r.html}</div>
+      </div>`;
+    }
+
+    const single = centerLogo || rightLogo || leftLogo || activeLogos[0];
+    if (single?.data_uri) {
+      const s = renderLogo(single.data_uri, single.width_px, single.height_px, single.offset_x_mm, single.offset_y_mm, single.auto_fit_scaling, single.name || titleText);
+      if (!titleText) {
+        const justify = single.alignment === "center" ? "center" : single.alignment === "right" ? "flex-end" : "flex-start";
+        return `<div class="hospai-shared-brand-row" style="justify-content: ${justify}; align-items: center; min-height: auto; padding: 2.5mm 0;">
+          <div style="display: flex; align-items: center; justify-content: ${justify}; overflow: visible;">${s.html}</div>
+        </div>`;
+      }
+      if (single.alignment === "center") {
+        return `<div class="hospai-shared-brand-row" style="flex-direction: column; align-items: center; justify-content: center; min-height: auto; gap: 2.5mm; padding: 2.5mm 0;">
+          <div style="display: flex; align-items: center; justify-content: center; overflow: visible;">${s.html}</div>
+          ${titleHtml}
+        </div>`;
+      }
+      if (single.alignment === "right") {
+        return `<div class="hospai-shared-brand-row" style="align-items: center; justify-content: space-between; min-height: auto; gap: 3mm; padding: 2.5mm 0;">
+          <div style="flex-shrink: 0; width: ${s.w.toFixed(2)}mm; visibility: hidden;" aria-hidden="true"></div>
+          ${titleHtml}
+          <div style="flex-shrink: 0; width: ${s.w.toFixed(2)}mm; display: flex; align-items: center; justify-content: flex-end; overflow: visible;">${s.html}</div>
+        </div>`;
+      }
+      return `<div class="hospai-shared-brand-row" style="align-items: center; justify-content: space-between; min-height: auto; gap: 3mm; padding: 2.5mm 0;">
+        <div style="flex-shrink: 0; width: ${s.w.toFixed(2)}mm; display: flex; align-items: center; justify-content: flex-start; overflow: visible;">${s.html}</div>
+        ${titleHtml}
+        <div style="flex-shrink: 0; width: ${s.w.toFixed(2)}mm; visibility: hidden;" aria-hidden="true"></div>
+      </div>`;
+    }
+  }
+
+  const [w, h] = fitMm(b.logo!.width_px, b.logo!.height_px, b.logo_box_mm[0], b.logo_box_mm[1], b.auto_fit_scaling);
   const safeOffsetY = Math.max(b.logo_offset_y_mm ?? 0, -2.5);
-  const logoImg = `<img src="${b.logo.data_uri}" alt="${escapeBrandText(titleText || "Hospital logo")}" style="display: block; width: ${w.toFixed(2)}mm; height: ${h.toFixed(2)}mm; max-width: 100%; object-fit: contain; position: relative; left: ${b.logo_offset_x_mm}mm; top: ${safeOffsetY}mm;" />`;
+  const logoImg = `<img src="${b.logo!.data_uri}" alt="${escapeBrandText(titleText || "Hospital logo")}" style="display: block; width: ${w.toFixed(2)}mm; height: ${h.toFixed(2)}mm; max-width: 100%; object-fit: contain; position: relative; left: ${b.logo_offset_x_mm}mm; top: ${safeOffsetY}mm;" />`;
 
   if (!titleText) {
     const justify = b.logo_alignment === "center" ? "center" : b.logo_alignment === "right" ? "flex-end" : "flex-start";
@@ -313,13 +369,81 @@ function applySharedHospaiPrintFrame(html: string): string {
 
 /** Adds the current module's watermark behind the content, repeated on every printed page (fixed position). */
 function applyWatermark(html: string): string {
-  const wm = getActiveWatermark();
+  // Detect module category from HTML if documentCategory is not explicitly set
+  let cat = getDocumentCategory();
+  if (!cat) {
+    const lower = html.toLowerCase();
+    if (lower.includes("data-hospai-category=")) {
+      const m = html.match(/data-hospai-category="([^"]+)"/i);
+      if (m) cat = m[1];
+    } else if (lower.includes("laboratory") || lower.includes("diagnostic") || lower.includes("specimen") || lower.includes("test report")) {
+      cat = "lab";
+    } else if (lower.includes("prescription") || lower.includes("rx date") || lower.includes("medicines prescribed")) {
+      cat = "prescription";
+    } else if (lower.includes("pharmacy") || lower.includes("dispense")) {
+      cat = "pharmacy";
+    } else if (lower.includes("discharge summary")) {
+      cat = "discharge";
+    } else if (lower.includes("bill") || lower.includes("invoice") || lower.includes("payment receipt")) {
+      cat = "billing";
+    } else if (lower.includes("inpatient") || lower.includes("admission slip") || lower.includes("bed management")) {
+      cat = "ip";
+    } else if (lower.includes("patient registration") || lower.includes("op registration") || lower.includes("token no")) {
+      cat = "op";
+    }
+  }
+
+  const wm = getActiveWatermark(cat);
   if (!wm || html.includes("hospai-shared-label-mark") || html.includes("data-hospai-watermark")) return html;
   const css = `<style data-hospai-watermark-style>
-    .hospai-watermark { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: ${wm.scale_pct}%; max-height: 90vh; object-fit: contain;
-      opacity: ${wm.opacity}; z-index: -1; pointer-events: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .hospai-watermark-wrap {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: 100vw;
+      height: 100vh;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .hospai-watermark {
+      width: ${wm.scale_pct}%;
+      max-width: 90%;
+      max-height: 85%;
+      object-fit: contain;
+      opacity: ${wm.opacity};
+      display: block;
+      margin: auto;
+      pointer-events: none;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+    @media print {
+      .hospai-watermark-wrap {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      .hospai-watermark {
+        display: block !important;
+        visibility: visible !important;
+        opacity: ${wm.opacity} !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+    }
   </style>`;
-  const img = `<img class="hospai-watermark" data-hospai-watermark alt="" src="${wm.data_uri}" />`;
+  const img = `<div class="hospai-watermark-wrap" data-hospai-watermark aria-hidden="true"><img class="hospai-watermark" alt="" src="${wm.data_uri}" /></div>`;
   let out = html.includes("</head>") ? html.replace("</head>", `${css}</head>`) : `${css}${html}`;
   out = out.includes("<body") ? out.replace(/<body([^>]*)>/i, `<body$1>${img}`) : `${img}${out}`;
   return out;

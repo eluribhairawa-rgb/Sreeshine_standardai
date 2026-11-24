@@ -17,6 +17,7 @@ venv/
 # editor / OS
 .DS_Store
 *.swp
+*.pid
 
 # local-only overrides and junk
 docker-compose.override.yml

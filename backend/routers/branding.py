@@ -59,13 +59,16 @@ def public_branding(db: Session = Depends(get_db), user: dict = Depends(get_curr
     """Read-only branding (with inline images) for the browser's print/PDF code. Any signed-in user."""
     out = _serialize(svc.fetch_row(db, hospital_id), with_data=True)
     out["watermarks"] = _public_watermarks(db, hospital_id)
+    out["logos"] = _public_logos(db, hospital_id)
     return out
 
 
 @router.get("")
 def get_branding_settings(db: Session = Depends(get_db), user: dict = Depends(require_permissions("admin.use")),
                           hospital_id: int = Depends(current_hospital_id)):
-    return _serialize(svc.fetch_row(db, hospital_id))
+    out = _serialize(svc.fetch_row(db, hospital_id))
+    out["logos"] = [_logo_serialize(r) for r in svc.list_logos(db, hospital_id)]
+    return out
 
 
 @router.put("")
@@ -347,3 +350,202 @@ def get_watermark_asset(wm_id: int, db: Session = Depends(get_db), user: dict = 
     with open(path, "rb") as f:
         body = f.read()
     return Response(body, media_type="image/png", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"})
+
+
+# ---------------------------------------------------------------------- logos --
+
+def _logo_serialize(row):
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "alignment": row.get("alignment") or "left",
+        "offset_x_mm": float(row.get("offset_x_mm") or 0),
+        "offset_y_mm": float(row.get("offset_y_mm") or 0),
+        "auto_fit_scaling": True if row.get("auto_fit_scaling") is None else bool(row.get("auto_fit_scaling")),
+        "modules": list(row.get("modules") or []),
+        "active": bool(row.get("active")),
+        "width_px": row.get("width_px"),
+        "height_px": row.get("height_px"),
+        "mime": row.get("image_mime"),
+        "image_url": f"/api/branding/logo-asset/{row['id']}?t={int(row['updated_at'].timestamp()) if row.get('updated_at') else 0}" if row.get("image_path") else None,
+        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+        "created_by": row.get("created_by"),
+    }
+
+
+def _public_logos(db, hospital_id):
+    out = []
+    for r in svc.list_logos(db, hospital_id, active_only=True):
+        path = svc.abs_path(r.get("image_path"))
+        if not path:
+            continue
+        mime = r.get("image_mime") or "image/png"
+        with open(path, "rb") as f:
+            uri = f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+        out.append({
+            "id": r["id"],
+            "name": r["name"],
+            "alignment": r.get("alignment") or "left",
+            "offset_x_mm": float(r.get("offset_x_mm") or 0),
+            "offset_y_mm": float(r.get("offset_y_mm") or 0),
+            "auto_fit_scaling": True if r.get("auto_fit_scaling") is None else bool(r.get("auto_fit_scaling")),
+            "modules": list(r.get("modules") or []),
+            "width_px": r.get("width_px"),
+            "height_px": r.get("height_px"),
+            "mime": mime,
+            "url": f"/api/branding/logo-asset/{r['id']}",
+            "data_uri": uri,
+        })
+    return out
+
+
+async def _logo_response(db, hospital_id):
+    return {
+        "logos": [_logo_serialize(r) for r in svc.list_logos(db, hospital_id)],
+        "modules": [{"id": m, "label": l} for m, l in svc.WATERMARK_MODULES],
+    }
+
+
+def _get_logo(db, hospital_id, logo_id):
+    row = db.execute(text("SELECT * FROM document_logos WHERE id = :i AND hospital_id = :h"), {"i": logo_id, "h": hospital_id}).mappings().first()
+    if not row:
+        raise HTTPException(404, "Logo not found.")
+    return dict(row)
+
+
+@router.get("/logos")
+def list_logos(db: Session = Depends(get_db), user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id)):
+    return {
+        "logos": [_logo_serialize(r) for r in svc.list_logos(db, hospital_id)],
+        "modules": [{"id": m, "label": l} for m, l in svc.WATERMARK_MODULES],
+    }
+
+
+@router.post("/logos")
+async def create_logo(
+    request: Request,
+    name: str = Form(...),
+    alignment: str = Form("left"),
+    offset_x_mm: float = Form(0),
+    offset_y_mm: float = Form(0),
+    auto_fit_scaling: bool = Form(True),
+    modules: str = Form(""),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")),
+    hospital_id: int = Depends(current_hospital_id),
+):
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(name or "")).strip()
+    if not name or len(name) > 100:
+        raise HTTPException(400, "Give the logo a name (up to 100 characters).")
+    align = str(alignment or "left").strip().lower()
+    if align not in svc.ALIGNMENTS:
+        raise HTTPException(400, "Alignment must be left, center or right.")
+    lim = svc.OFFSET_LIMIT_MM
+    if not (-lim <= offset_x_mm <= lim and -lim <= offset_y_mm <= lim):
+        raise HTTPException(400, f"Offsets must be between -{lim:g} and {lim:g} mm.")
+    if isinstance(modules, str):
+        mods = [m.strip() for m in re.split(r"[,\s]+", modules) if m.strip()]
+    else:
+        mods = list(modules or [])
+    data = await file.read(svc.MAX_UPLOAD_BYTES + 1)
+    try:
+        blob, mime, w, h = svc.process_asset(data, file.filename or "")
+    except svc.BrandingError as exc:
+        raise HTTPException(400, str(exc))
+    logo_id = db.execute(
+        text("""INSERT INTO document_logos (hospital_id, name, image_mime, width_px, height_px, alignment, offset_x_mm, offset_y_mm, auto_fit_scaling, modules, created_by)
+                VALUES (:h, :n, :m, :w, :ht, :al, :ox, :oy, :af, :mods, :u) RETURNING id"""),
+        {"h": hospital_id, "n": name, "m": mime, "w": w, "ht": h, "al": align, "ox": offset_x_mm, "oy": offset_y_mm, "af": auto_fit_scaling, "mods": mods, "u": user.get("username")},
+    ).scalar()
+    rel = svc.save_logo_entry(hospital_id, logo_id, blob, mime)
+    db.execute(text("UPDATE document_logos SET image_path = :p WHERE id = :i"), {"p": rel, "i": logo_id})
+    log_audit_event(db, user, client_ip(request), "create", "logo", str(logo_id), {"name": name, "modules": mods, "alignment": align})
+    db.commit()
+    svc.invalidate_logos(hospital_id)
+    return await _logo_response(db, hospital_id)
+
+
+@router.put("/logos/{logo_id}")
+async def update_logo(
+    logo_id: int, request: Request, payload: dict = Body(...), db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_logo(db, hospital_id, logo_id)
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(payload.get("name", row["name"]))).strip()
+    if not name or len(name) > 100:
+        raise HTTPException(400, "Give the logo a name (up to 100 characters).")
+    align = str(payload.get("alignment", row.get("alignment") or "left")).strip().lower()
+    if align not in svc.ALIGNMENTS:
+        raise HTTPException(400, "Alignment must be left, center or right.")
+    try:
+        ox = float(payload.get("offset_x_mm", row.get("offset_x_mm") or 0))
+        oy = float(payload.get("offset_y_mm", row.get("offset_y_mm") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Offsets must be numbers.")
+    lim = svc.OFFSET_LIMIT_MM
+    if not (-lim <= ox <= lim and -lim <= oy <= lim):
+        raise HTTPException(400, f"Offsets must be between -{lim:g} and {lim:g} mm.")
+    raw_mods = payload.get("modules", row["modules"])
+    if isinstance(raw_mods, str):
+        mods = [m.strip() for m in re.split(r"[,\s]+", raw_mods) if m.strip()]
+    else:
+        mods = list(raw_mods or [])
+    auto_fit = bool(payload.get("auto_fit_scaling", row.get("auto_fit_scaling", True)))
+    active = bool(payload.get("active", row.get("active", True)))
+    db.execute(
+        text("""UPDATE document_logos SET name = :n, alignment = :al, offset_x_mm = :ox, offset_y_mm = :oy,
+                auto_fit_scaling = :af, modules = :mods, active = :a, updated_at = NOW() WHERE id = :i"""),
+        {"n": name, "al": align, "ox": ox, "oy": oy, "af": auto_fit, "mods": mods, "a": active, "i": logo_id},
+    )
+    log_audit_event(db, user, client_ip(request), "update", "logo", str(logo_id), {"name": name, "modules": mods, "active": active})
+    db.commit()
+    svc.invalidate_logos(hospital_id)
+    return await _logo_response(db, hospital_id)
+
+
+@router.post("/logos/{logo_id}/image")
+async def replace_logo_image(
+    logo_id: int, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_logo(db, hospital_id, logo_id)
+    data = await file.read(svc.MAX_UPLOAD_BYTES + 1)
+    try:
+        blob, mime, w, h = svc.process_asset(data, file.filename or "")
+    except svc.BrandingError as exc:
+        raise HTTPException(400, str(exc))
+    rel = svc.save_logo_entry(hospital_id, logo_id, blob, mime)
+    db.execute(text("UPDATE document_logos SET image_path = :p, image_mime = :m, width_px = :w, height_px = :h, updated_at = NOW() WHERE id = :i"),
+               {"p": rel, "m": mime, "w": w, "h": h, "i": logo_id})
+    log_audit_event(db, user, client_ip(request), "replace_image", "logo", str(logo_id), {})
+    db.commit()
+    svc.remove_asset(row.get("image_path"))
+    svc.invalidate_logos(hospital_id)
+    return await _logo_response(db, hospital_id)
+
+
+@router.delete("/logos/{logo_id}")
+async def delete_logo(
+    logo_id: int, request: Request, db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_logo(db, hospital_id, logo_id)
+    db.execute(text("DELETE FROM document_logos WHERE id = :i"), {"i": logo_id})
+    log_audit_event(db, user, client_ip(request), "delete", "logo", str(logo_id), {"name": row["name"]})
+    db.commit()
+    svc.remove_asset(row.get("image_path"))
+    svc.invalidate_logos(hospital_id)
+    return await _logo_response(db, hospital_id)
+
+
+@router.get("/logo-asset/{logo_id}")
+def get_logo_asset(logo_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user), hospital_id: int = Depends(current_hospital_id)):
+    row = _get_logo(db, hospital_id, logo_id)
+    path = svc.abs_path(row.get("image_path"))
+    if not path:
+        raise HTTPException(404, "Not found")
+    with open(path, "rb") as f:
+        body = f.read()
+    return Response(body, media_type=row.get("image_mime") or "image/png", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"})
+

@@ -14,6 +14,33 @@ type Watermark = {
 type WatermarkList = { watermarks: Watermark[]; modules: { id: string; label: string }[] };
 type Alignment = "left" | "center" | "right";
 
+type LogoItem = {
+  id: number;
+  name: string;
+  alignment: Alignment;
+  offset_x_mm: number;
+  offset_y_mm: number;
+  auto_fit_scaling: boolean;
+  modules: string[];
+  active: boolean;
+  width_px: number | null;
+  height_px: number | null;
+  image_url: string | null;
+  mime: string;
+};
+type LogoList = { logos: LogoItem[]; modules: { id: string; label: string }[] };
+type LogoDraft = {
+  key: string;
+  file: File;
+  url: string;
+  name: string;
+  alignment: Alignment;
+  offsetX: string;
+  offsetY: string;
+  autoFit: boolean;
+  modules: string[];
+};
+
 const PX_PER_MM = 3; // preview scale: 180mm content width -> 540px
 const ACCEPT = ".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
 
@@ -32,6 +59,16 @@ export default function BrandingPage({ setNotice }: Props) {
   const logoInput = useRef<HTMLInputElement>(null);
   const footerInput = useRef<HTMLInputElement>(null);
 
+  // ---- multiple logos (with module permissions) ----
+  const [logoList, setLogoList] = useState<LogoItem[]>([]);
+  const [logoModules, setLogoModules] = useState<{ id: string; label: string }[]>([]);
+  const [logoDrafts, setLogoDrafts] = useState<LogoDraft[]>([]);
+  const [logoEditing, setLogoEditing] = useState<number | null>(null);
+  const multiLogoInput = useRef<HTMLInputElement>(null);
+  const logoDraftsRef = useRef<LogoDraft[]>([]);
+  logoDraftsRef.current = logoDrafts;
+  useEffect(() => () => { logoDraftsRef.current.forEach((d) => URL.revokeObjectURL(d.url)); }, []);
+
   // ---- watermarks (per module) ----
   const [wmList, setWmList] = useState<Watermark[]>([]);
   const [wmModules, setWmModules] = useState<{ id: string; label: string }[]>([]);
@@ -45,6 +82,7 @@ export default function BrandingPage({ setNotice }: Props) {
   useEffect(() => () => { draftsRef.current.forEach((d) => URL.revokeObjectURL(d.url)); }, []);
   // Which watermark the live preview page shows: "auto" (the one being added, else the first saved), "none", or a saved id.
   const [previewWm, setPreviewWm] = useState<string>("auto");
+  const [previewModule, setPreviewModule] = useState<string>("all");
 
   const hydrate = useCallback((data: BrandingConfig) => {
     setCfg(data);
@@ -69,7 +107,138 @@ export default function BrandingPage({ setNotice }: Props) {
     apiFetch<WatermarkList>("/api/branding/watermarks").then(applyWm).catch((e) => setError(e?.message || "Unable to load watermarks."));
   }, []);
 
+  const applyLogos = (data: LogoList) => {
+    setLogoList(data.logos || []);
+    if (data.modules?.length) setLogoModules(data.modules);
+  };
+  useEffect(() => {
+    apiFetch<LogoList>("/api/branding/logos").then(applyLogos).catch(() => {});
+  }, []);
+
   const baseUrl = (API_BASE || "").replace(/\/+$/, "").replace(/\/api$/, "");
+
+  const activeModulesList = logoModules.length ? logoModules : wmModules;
+
+  // ---- multi-logo operations ----
+  const addLogoDraftFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    const added: LogoDraft[] = Array.from(files).map((file, i) => ({
+      key: `${Date.now()}-${i}-${file.name}`,
+      file,
+      url: URL.createObjectURL(file),
+      name: file.name.replace(/\.[^.]+$/, "").slice(0, 100),
+      alignment: "left",
+      offsetX: "0",
+      offsetY: "0",
+      autoFit: true,
+      modules: [],
+    }));
+    setLogoDrafts((cur) => [...cur, ...added]);
+    setError("");
+  };
+
+  const patchLogoDraft = (key: string, patch: Partial<LogoDraft>) =>
+    setLogoDrafts((cur) => cur.map((d) => (d.key === key ? { ...d, ...patch } : d)));
+
+  const removeLogoDraft = (key: string) =>
+    setLogoDrafts((cur) => {
+      cur.filter((d) => d.key === key).forEach((d) => URL.revokeObjectURL(d.url));
+      return cur.filter((d) => d.key !== key);
+    });
+
+  const saveLogoDrafts = async () => {
+    for (const d of logoDrafts) {
+      if (!d.name.trim()) return setError("Give every logo a name.");
+    }
+    setBusy("logo-add");
+    setError("");
+    let saved = 0;
+    try {
+      for (const d of logoDrafts) {
+        const body = new FormData();
+        body.append("file", d.file);
+        body.append("name", d.name.trim());
+        body.append("alignment", d.alignment);
+        body.append("offset_x_mm", d.offsetX);
+        body.append("offset_y_mm", d.offsetY);
+        body.append("auto_fit_scaling", String(d.autoFit));
+        body.append("modules", d.modules.join(","));
+        const response = await fetch(`${baseUrl}/api/branding/logos`, {
+          method: "POST",
+          body,
+          credentials: "include",
+          headers: { "X-Hospital-Code": getHospitalCode() },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`${d.name}: ${typeof data?.detail === "string" ? data.detail : data?.error || "Upload failed."}`);
+        applyLogos(data);
+        removeLogoDraft(d.key);
+        saved += 1;
+      }
+      await refreshGlobal();
+      setNotice({ type: "success", message: `${saved} logo${saved === 1 ? "" : "s"} added with module permissions.` });
+    } catch (e) {
+      setError((e as Error).message);
+      if (saved) await refreshGlobal();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const updateLogoItem = async (logo: LogoItem, patch: Partial<LogoItem>) => {
+    setBusy(`logo-${logo.id}`);
+    setError("");
+    try {
+      applyLogos(await apiFetch<LogoList>(`/api/branding/logos/${logo.id}`, { method: "PUT", body: JSON.stringify({ ...logo, ...patch }) }));
+      await refreshGlobal();
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const deleteLogoItem = async (logo: LogoItem) => {
+    if (!window.confirm(`Delete the logo "${logo.name}"?`)) return;
+    setBusy(`logo-${logo.id}`);
+    setError("");
+    try {
+      applyLogos(await apiFetch<LogoList>(`/api/branding/logos/${logo.id}`, { method: "DELETE" }));
+      await refreshGlobal();
+      setNotice({ type: "success", message: `Logo "${logo.name}" deleted.` });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const replaceLogoImage = async (logo: LogoItem, file: File | undefined | null) => {
+    if (!file) return;
+    setBusy(`logo-${logo.id}`);
+    setError("");
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch(`${baseUrl}/api/branding/logos/${logo.id}/image`, {
+        method: "POST",
+        body,
+        credentials: "include",
+        headers: { "X-Hospital-Code": getHospitalCode() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : data?.error || "Upload failed.");
+      applyLogos(data);
+      await refreshGlobal();
+      setNotice({ type: "success", message: `Updated image for "${logo.name}".` });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
 
   const upload = async (kind: "logo" | "footer", file: File | undefined | null) => {
     if (!file) return;
@@ -301,15 +470,71 @@ export default function BrandingPage({ setNotice }: Props) {
     <img src={logoSrc} alt="Logo preview" style={{ width: lw * PX_PER_MM, height: lh * PX_PER_MM, objectFit: "contain", position: "relative", left: ox * PX_PER_MM, top: oy * PX_PER_MM, display: "block" }} />
   ) : null;
 
+  const logoModuleLabel = (id: string) => activeModulesList.find((m) => m.id === id)?.label || id;
+
+  const moduleLogos = logoList.filter((l) => {
+    if (!l.active) return false;
+    if (previewModule === "all") return true;
+    return !l.modules.length || l.modules.includes(previewModule);
+  });
+
+  const previewLeftLogo = moduleLogos.find((l) => l.alignment === "left");
+  const previewRightLogo = moduleLogos.find((l) => l.alignment === "right");
+  const previewCenterLogo = moduleLogos.find((l) => l.alignment === "center");
+  const hasMultipleLogos = moduleLogos.length > 0;
+
+  const renderHeaderLogo = (item: LogoItem) => {
+    const [w, h] = fitMm(item.width_px, item.height_px, logoBox[0], logoBox[1], item.auto_fit_scaling);
+    const src = item.image_url ? `${baseUrl}${item.image_url}` : "";
+    return (
+      <img
+        src={src}
+        alt={item.name}
+        style={{
+          width: w * PX_PER_MM,
+          height: h * PX_PER_MM,
+          objectFit: "contain",
+          position: "relative",
+          left: (item.offset_x_mm || 0) * PX_PER_MM,
+          top: Math.max(item.offset_y_mm || 0, -2.5) * PX_PER_MM,
+          display: "block",
+        }}
+      />
+    );
+  };
+
   const draftToPreview = (d: WmDraft) => ({ src: d.url, opacity: d.opacity / 100, scale: d.scale, label: `New: ${d.name || d.file.name}`, modules: d.modules });
   const savedWm = (w: Watermark) => ({ src: w.image_url ? `${baseUrl}${w.image_url}` : "", opacity: w.opacity, scale: w.scale_pct, label: w.name, modules: w.modules });
-  const shownWm = previewWm === "none"
-    ? null
-    : previewWm === "auto"
-      ? (drafts[0] ? draftToPreview(drafts[0]) : (wmList[0] ? savedWm(wmList[0]) : null))
-      : previewWm.startsWith("draft:")
-        ? (() => { const d = drafts.find((x) => x.key === previewWm.slice(6)); return d ? draftToPreview(d) : null; })()
-        : (() => { const w = wmList.find((x) => String(x.id) === previewWm); return w ? savedWm(w) : null; })();
+
+  const resolveWatermarkForPreview = () => {
+    if (previewWm === "none") return null;
+
+    if (previewWm !== "auto") {
+      if (previewWm.startsWith("draft:")) {
+        const d = drafts.find((x) => x.key === previewWm.slice(6));
+        return d ? draftToPreview(d) : null;
+      }
+      const w = wmList.find((x) => String(x.id) === previewWm);
+      return w ? savedWm(w) : null;
+    }
+
+    // previewWm === "auto": find watermark assigned to previewModule
+    if (previewModule === "all") {
+      if (drafts.length > 0) return draftToPreview(drafts[0]);
+      const active = wmList.find((w) => w.active);
+      return active ? savedWm(active) : null;
+    }
+
+    const draftMatch = drafts.find((d) => d.modules.includes(previewModule));
+    if (draftMatch) return draftToPreview(draftMatch);
+
+    const savedMatch = wmList.find((w) => w.active && w.modules.includes(previewModule));
+    if (savedMatch) return savedWm(savedMatch);
+
+    return null;
+  };
+
+  const shownWm = resolveWatermarkForPreview();
 
   if (!cfg) {
     return <div className="panel"><p className="muted">{error || "Loading branding settings…"}</p></div>;
@@ -394,44 +619,244 @@ export default function BrandingPage({ setNotice }: Props) {
         </section>
 
         <section style={section}>
-          <h3 style={{ margin: "0 0 10px" }}>Header logo</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, margin: "0 0 8px" }}>
+            <h3 style={{ margin: 0 }}>Header Logos & Module Permissions</h3>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              disabled={!!busy}
+              onClick={() => multiLogoInput.current?.click()}
+            >
+              + Add Logo
+            </Button>
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
+            Upload multiple logos (e.g. Hospital Main Logo, NABH/NABL Accreditation, ISO, or Partner logos). Position them (Top-Left, Top-Right, or Top-Center) and choose module permissions for each logo.
+          </p>
+
           <div
             style={drop("logo")}
-            onClick={() => logoInput.current?.click()}
+            onClick={() => multiLogoInput.current?.click()}
             onDragOver={(e) => { e.preventDefault(); setDragging("logo"); }}
             onDragLeave={() => setDragging("")}
-            onDrop={onDrop("logo")}
-            role="button" tabIndex={0}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") logoInput.current?.click(); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging("");
+              addLogoDraftFiles(e.dataTransfer.files);
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") multiLogoInput.current?.click(); }}
           >
-            {busy === "logo" ? "Uploading…" : cfg.logo ? "Drop or click to replace the logo" : "Drop a logo here or click to browse"}
-            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>PNG, JPG or SVG · up to 5 MB · automatically scaled to fit the header</div>
+            {busy === "logo-add" ? "Uploading logos…" : "Drop one or more logos here or click to browse"}
+            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+              PNG, JPG or SVG · up to 5 MB · select multiple files at once
+            </div>
           </div>
-          <input ref={logoInput} type="file" accept={ACCEPT} hidden onChange={(e) => { void upload("logo", e.target.files?.[0]); e.target.value = ""; }} />
-          {cfg.logo && <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeAsset("logo")} style={{ marginTop: 8 }}>Remove logo</Button>}
+          <input
+            ref={multiLogoInput}
+            type="file"
+            multiple
+            accept={ACCEPT}
+            hidden
+            onChange={(e) => {
+              addLogoDraftFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
 
-          <div style={{ marginTop: 14 }}>
-            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>Position</div>
-            <div role="group" aria-label="Logo alignment" style={{ display: "flex", gap: 6 }}>
-              {(["left", "center", "right"] as Alignment[]).map((a) => (
-                <Button key={a} variant={alignment === a ? "primary" : "secondary"} size="sm" aria-pressed={alignment === a} onClick={() => setAlignment(a)}>
-                  Top-{a[0].toUpperCase() + a.slice(1)}
-                </Button>
+          {/* DRAFTS */}
+          {logoDrafts.length > 0 && (
+            <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#1e293b" }}>New Logos to Add ({logoDrafts.length})</div>
+              {logoDrafts.map((d, idx) => (
+                <div key={d.key} style={{ border: "1px solid #93c5fd", borderRadius: 10, padding: 12, background: "#f8fafc" }}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
+                    <img
+                      src={d.url}
+                      alt=""
+                      style={{ width: 56, height: 56, objectFit: "contain", border: "1px solid #cbd5e1", borderRadius: 8, background: "#fff", flexShrink: 0 }}
+                    />
+                    <label style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>
+                      Logo {idx + 1} Name
+                      <Input
+                        value={d.name}
+                        maxLength={100}
+                        placeholder="e.g. Primary Hospital Logo, NABH Accreditation"
+                        onChange={(e) => patchLogoDraft(d.key, { name: e.target.value })}
+                      />
+                    </label>
+                    <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => removeLogoDraft(d.key)}>
+                      Remove
+                    </Button>
+                  </div>
+
+                  <div style={{ marginBottom: 10 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4, fontWeight: 600 }}>Position in Header</div>
+                    <div role="group" aria-label="Logo alignment" style={{ display: "flex", gap: 6 }}>
+                      {(["left", "center", "right"] as Alignment[]).map((a) => (
+                        <Button
+                          key={a}
+                          type="button"
+                          variant={d.alignment === a ? "primary" : "secondary"}
+                          size="sm"
+                          onClick={() => patchLogoDraft(d.key, { alignment: a })}
+                        >
+                          Top-{a[0].toUpperCase() + a.slice(1)}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12, marginBottom: 10 }}>
+                    <label style={{ flex: 1, fontSize: 12 }}>
+                      X offset (mm)
+                      <Input
+                        type="number"
+                        min={-30}
+                        max={30}
+                        step={0.5}
+                        value={d.offsetX}
+                        onChange={(e) => patchLogoDraft(d.key, { offsetX: e.target.value })}
+                      />
+                    </label>
+                    <label style={{ flex: 1, fontSize: 12 }}>
+                      Y offset (mm)
+                      <Input
+                        type="number"
+                        min={-30}
+                        max={30}
+                        step={0.5}
+                        value={d.offsetY}
+                        onChange={(e) => patchLogoDraft(d.key, { offsetY: e.target.value })}
+                      />
+                    </label>
+                  </div>
+
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 10, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={d.autoFit}
+                      onChange={(e) => patchLogoDraft(d.key, { autoFit: e.target.checked })}
+                    />
+                    <span>Auto-fit scaling (resize into header box, aspect ratio preserved)</span>
+                  </label>
+
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Module Permissions</div>
+                    <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+                      Select which modules this logo should appear on (leave empty to apply to all modules):
+                    </div>
+                    <LogoModulePicker
+                      modules={activeModulesList}
+                      selected={d.modules}
+                      onToggle={(id) =>
+                        patchLogoDraft(d.key, {
+                          modules: d.modules.includes(id) ? d.modules.filter((m) => m !== id) : [...d.modules, id],
+                        })
+                      }
+                      onSelectAll={() => patchLogoDraft(d.key, { modules: activeModulesList.map((m) => m.id) })}
+                      onClearAll={() => patchLogoDraft(d.key, { modules: [] })}
+                    />
+                  </div>
+                </div>
               ))}
+
+              <div>
+                <Button variant="primary" disabled={!!busy} onClick={saveLogoDrafts}>
+                  {busy === "logo-add" ? "Saving logos…" : logoDrafts.length > 1 ? `Save ${logoDrafts.length} logos` : "Save logo"}
+                </Button>
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 12, marginTop: 10 }}>
-              <label style={{ flex: 1, fontSize: 12 }}>X offset (mm)
-                <Input type="number" min={-30} max={30} step={0.5} value={offsetX} onChange={(e) => setOffsetX(e.target.value)} />
-              </label>
-              <label style={{ flex: 1, fontSize: 12 }}>Y offset (mm)
-                <Input type="number" min={-30} max={30} step={0.5} value={offsetY} onChange={(e) => setOffsetY(e.target.value)} />
-              </label>
+          )}
+
+          {/* SAVED LOGOS */}
+          {logoList.length > 0 && (
+            <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#1e293b" }}>Saved Logos ({logoList.length})</div>
+              {logoList.map((logo) => {
+                const isEditing = logoEditing === logo.id;
+                const isRowBusy = busy === `logo-${logo.id}`;
+                const alignLabel = logo.alignment === "right" ? "Top-Right" : logo.alignment === "center" ? "Top-Center" : "Top-Left";
+                return (
+                  <div key={logo.id} style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, background: "#fff", opacity: logo.active ? 1 : 0.6 }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <div style={{ width: 56, height: 56, flexShrink: 0, border: "1px solid #e2e8f0", borderRadius: 8, background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                        {logo.image_url ? (
+                          <img src={`${baseUrl}${logo.image_url}`} alt={logo.name} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                        ) : (
+                          <span className="muted" style={{ fontSize: 10 }}>No image</span>
+                        )}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, color: "#0f172a", fontSize: 14 }}>{logo.name}</span>
+                          <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#e0e7ff", color: "#3730a3", fontWeight: 600 }}>{alignLabel}</span>
+                          {!logo.active && <span className="muted" style={{ fontSize: 11 }}>· Disabled</span>}
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                          {logo.modules.length === 0 ? (
+                            <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#f0fdf4", color: "#166534", fontWeight: 600 }}>
+                              All Modules (Default)
+                            </span>
+                          ) : (
+                            logo.modules.map((m) => (
+                              <span key={m} style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#f1f5f9", color: "#334155", fontWeight: 500 }}>
+                                {logoModuleLabel(m)}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                          Offset: X {logo.offset_x_mm}mm, Y {logo.offset_y_mm}mm · {logo.auto_fit_scaling ? "Auto-fit on" : "Original scale"}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <Button size="sm" variant="secondary" disabled={isRowBusy} onClick={() => setLogoEditing(isEditing ? null : logo.id)}>
+                          {isEditing ? "Close" : "Edit permissions"}
+                        </Button>
+                        <Button size="sm" variant="ghost" disabled={isRowBusy} onClick={() => deleteLogoItem(logo)}>
+                          Delete
+                        </Button>
+                      </div>
+                    </div>
+                    {isEditing && (
+                      <LogoEditor
+                        logo={logo}
+                        modules={activeModulesList}
+                        busy={isRowBusy}
+                        onSave={async (patch) => {
+                          if (await updateLogoItem(logo, patch)) setLogoEditing(null);
+                        }}
+                        onReplaceImage={(file) => replaceLogoImage(logo, file)}
+                        onClose={() => setLogoEditing(null)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
-            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontSize: 13 }}>
-              <input type="checkbox" checked={autoFit} onChange={(e) => setAutoFit(e.target.checked)} />
-              Auto-fit scaling (resize into the header box, aspect ratio preserved)
-            </label>
-          </div>
+          )}
+
+          {/* Fallback Single Logo (Legacy) */}
+          {cfg.logo && logoList.length === 0 && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px dashed #cbd5e1" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6 }}>
+                Primary Single Logo (Active Fallback)
+              </div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <img src={logoSrc} alt="Primary logo" style={{ width: 48, height: 48, objectFit: "contain", border: "1px solid #e2e8f0", borderRadius: 6, background: "#fff" }} />
+                <div style={{ flex: 1, fontSize: 12 }}>
+                  <div>Alignment: Top-{alignment[0].toUpperCase() + alignment.slice(1)} · X: {offsetX}mm, Y: {offsetY}mm</div>
+                  <div className="muted" style={{ fontSize: 11 }}>Applies to all documents until module-specific logos are added above.</div>
+                </div>
+                <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeAsset("logo")}>
+                  Remove
+                </Button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section style={section}>
@@ -546,14 +971,30 @@ export default function BrandingPage({ setNotice }: Props) {
         <section style={section}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", margin: "0 0 10px" }}>
             <h3 style={{ margin: 0 }}>Live preview</h3>
-            <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>Watermark
-              <select value={previewWm} onChange={(e) => setPreviewWm(e.target.value)} style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #cbd5e1", fontSize: 12, maxWidth: 190 }}>
-                <option value="auto">Auto</option>
-                <option value="none">None</option>
-                {drafts.map((d) => <option key={d.key} value={`draft:${d.key}`}>{`New: ${d.name || d.file.name}`}</option>)}
-                {wmList.map((w) => <option key={w.id} value={String(w.id)}>{w.name}</option>)}
-              </select>
-            </label>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                Module:
+                <select
+                  value={previewModule}
+                  onChange={(e) => setPreviewModule(e.target.value)}
+                  style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #cbd5e1", fontSize: 12, maxWidth: 160 }}
+                >
+                  <option value="all">All Modules</option>
+                  {activeModulesList.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                Watermark:
+                <select value={previewWm} onChange={(e) => setPreviewWm(e.target.value)} style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #cbd5e1", fontSize: 12, maxWidth: 170 }}>
+                  <option value="auto">Auto {shownWm ? `(${shownWm.label})` : "(None)"}</option>
+                  <option value="none">None</option>
+                  {drafts.map((d) => <option key={d.key} value={`draft:${d.key}`}>{`New: ${d.name || d.file.name}`}</option>)}
+                  {wmList.map((w) => <option key={w.id} value={String(w.id)}>{w.name}</option>)}
+                </select>
+              </label>
+            </div>
           </div>
           {/* A full A4 page (210 x 297 mm at 3px/mm), shrunk to fit the column, so the watermark is seen where it will print. */}
           <div style={{ zoom: 0.6, display: "flex", justifyContent: "center" }}>
@@ -574,34 +1015,97 @@ export default function BrandingPage({ setNotice }: Props) {
                 width: "100%",
                 overflow: "visible",
               }}>
-                {logoEl ? (
-                  !trimmedTitle ? (
-                    <div style={{ width: "100%", display: "flex", justifyContent: alignment === "center" ? "center" : alignment === "right" ? "flex-end" : "flex-start" }}>
-                      {logoEl}
-                    </div>
-                  ) : alignment === "center" ? (
-                    <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                      <div>{logoEl}</div>
-                      {titleEl}
-                    </div>
-                  ) : alignment === "right" ? (
-                    <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div style={{ width: lw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
-                      {titleEl}
-                      <div style={{ width: lw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>{logoEl}</div>
-                    </div>
-                  ) : (
-                    <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div style={{ width: lw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-start" }}>{logoEl}</div>
-                      {titleEl}
-                      <div style={{ width: lw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
-                    </div>
-                  )
-                ) : trimmedTitle ? (
-                  titleEl
-                ) : (
-                  <div className="muted" style={{ fontSize: 12, textAlign: "center", width: "100%" }}>Default HospAI header (no custom logo or title)</div>
-                )}
+                {(() => {
+                  if (hasMultipleLogos) {
+                    if (previewLeftLogo && previewRightLogo) {
+                      const [plw] = fitMm(previewLeftLogo.width_px, previewLeftLogo.height_px, logoBox[0], logoBox[1], previewLeftLogo.auto_fit_scaling);
+                      const [prw] = fitMm(previewRightLogo.width_px, previewRightLogo.height_px, logoBox[0], logoBox[1], previewRightLogo.auto_fit_scaling);
+                      return (
+                        <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div style={{ width: plw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-start" }}>
+                            {renderHeaderLogo(previewLeftLogo)}
+                          </div>
+                          {titleEl}
+                          <div style={{ width: prw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>
+                            {renderHeaderLogo(previewRightLogo)}
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (previewCenterLogo) {
+                      return (
+                        <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                          <div>{renderHeaderLogo(previewCenterLogo)}</div>
+                          {titleEl}
+                        </div>
+                      );
+                    }
+                    if (previewRightLogo) {
+                      const [prw] = fitMm(previewRightLogo.width_px, previewRightLogo.height_px, logoBox[0], logoBox[1], previewRightLogo.auto_fit_scaling);
+                      return (
+                        <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div style={{ width: prw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
+                          {titleEl}
+                          <div style={{ width: prw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>
+                            {renderHeaderLogo(previewRightLogo)}
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (previewLeftLogo) {
+                      const [plw] = fitMm(previewLeftLogo.width_px, previewLeftLogo.height_px, logoBox[0], logoBox[1], previewLeftLogo.auto_fit_scaling);
+                      return (
+                        <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div style={{ width: plw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-start" }}>
+                            {renderHeaderLogo(previewLeftLogo)}
+                          </div>
+                          {titleEl}
+                          <div style={{ width: plw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
+                        </div>
+                      );
+                    }
+                  }
+
+                  if (logoEl) {
+                    if (!trimmedTitle) {
+                      return (
+                        <div style={{ width: "100%", display: "flex", justifyContent: alignment === "center" ? "center" : alignment === "right" ? "flex-end" : "flex-start" }}>
+                          {logoEl}
+                        </div>
+                      );
+                    }
+                    if (alignment === "center") {
+                      return (
+                        <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                          <div>{logoEl}</div>
+                          {titleEl}
+                        </div>
+                      );
+                    }
+                    if (alignment === "right") {
+                      return (
+                        <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div style={{ width: lw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
+                          {titleEl}
+                          <div style={{ width: lw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>{logoEl}</div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <div style={{ width: lw * PX_PER_MM, flexShrink: 0, display: "flex", justifyContent: "flex-start" }}>{logoEl}</div>
+                        {titleEl}
+                        <div style={{ width: lw * PX_PER_MM, flexShrink: 0, visibility: "hidden" }} aria-hidden="true" />
+                      </div>
+                    );
+                  }
+
+                  if (trimmedTitle) {
+                    return titleEl;
+                  }
+
+                  return <div className="muted" style={{ fontSize: 12, textAlign: "center", width: "100%" }}>Default HospAI header (no custom logo or title)</div>;
+                })()}
               </div>
               <div style={{ flex: 1, margin: "14px 0", color: "#94a3b8", fontSize: 11 }}>
                 <div style={{ fontWeight: 800, fontSize: 15, color: "#334155", marginBottom: 6 }}>Document title</div>
@@ -700,6 +1204,192 @@ function WatermarkEditor({ wm, modules, takenBy, busy, onSave, onReplaceImage }:
         <Button size="sm" variant="primary" disabled={busy} onClick={() => onSave({ name, modules: selected, opacity: opacity / 100, scale_pct: scale, active })}>{busy ? "Saving…" : "Save changes"}</Button>
         <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>Replace image</Button>
         <input ref={fileRef} type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" hidden onChange={(e) => { onReplaceImage(e.target.files?.[0]); e.target.value = ""; }} />
+      </div>
+    </div>
+  );
+}
+
+function LogoModulePicker({
+  modules,
+  selected,
+  onToggle,
+  onSelectAll,
+  onClearAll,
+}: {
+  modules: { id: string; label: string }[];
+  selected: string[];
+  onToggle: (id: string) => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+}) {
+  const allSelected = modules.length > 0 && modules.every((m) => selected.includes(m.id));
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span className="muted" style={{ fontSize: 11 }}>
+          {selected.length === 0
+            ? "Applies to all modules (no restriction)"
+            : allSelected
+            ? "Permitted on all modules"
+            : `Permitted on ${selected.length} of ${modules.length} modules`}
+        </span>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            onClick={onSelectAll}
+            style={{ fontSize: 11, background: "none", border: "none", color: "#2563eb", cursor: "pointer", textDecoration: "underline", padding: 0 }}
+          >
+            Select All
+          </button>
+          <span className="muted" style={{ fontSize: 11 }}>·</span>
+          <button
+            type="button"
+            onClick={onClearAll}
+            style={{ fontSize: 11, background: "none", border: "none", color: "#64748b", cursor: "pointer", textDecoration: "underline", padding: 0 }}
+          >
+            Clear All
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 6 }}>
+        {modules.map((m) => {
+          const isChecked = selected.includes(m.id);
+          return (
+            <label
+              key={m.id}
+              style={{
+                display: "flex",
+                gap: 6,
+                alignItems: "center",
+                fontSize: 12.5,
+                cursor: "pointer",
+                padding: "4px 8px",
+                borderRadius: 6,
+                background: isChecked ? "#eff6ff" : "#f8fafc",
+                border: `1px solid ${isChecked ? "#93c5fd" : "#e2e8f0"}`,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={isChecked}
+                onChange={() => onToggle(m.id)}
+              />
+              <span style={{ color: isChecked ? "#1e40af" : "#334155", fontWeight: isChecked ? 600 : 400 }}>{m.label}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LogoEditor({
+  logo,
+  modules,
+  busy,
+  onSave,
+  onReplaceImage,
+  onClose,
+}: {
+  logo: LogoItem;
+  modules: { id: string; label: string }[];
+  busy: boolean;
+  onSave: (patch: Partial<LogoItem>) => void | Promise<void>;
+  onReplaceImage: (file: File | undefined | null) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(logo.name);
+  const [alignment, setAlignment] = useState<Alignment>(logo.alignment || "left");
+  const [offsetX, setOffsetX] = useState(String(logo.offset_x_mm ?? 0));
+  const [offsetY, setOffsetY] = useState(String(logo.offset_y_mm ?? 0));
+  const [autoFit, setAutoFit] = useState(logo.auto_fit_scaling !== false);
+  const [selected, setSelected] = useState<string[]>(logo.modules || []);
+  const [active, setActive] = useState(logo.active !== false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #e2e8f0", display: "grid", gap: 10 }}>
+      <label style={{ fontSize: 12, fontWeight: 600 }}>
+        Logo Name
+        <Input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="e.g. Primary Hospital Logo or NABH Accreditation" />
+      </label>
+
+      <div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 6, fontWeight: 600 }}>Position in Header</div>
+        <div role="group" aria-label="Logo alignment" style={{ display: "flex", gap: 6 }}>
+          {(["left", "center", "right"] as Alignment[]).map((a) => (
+            <Button
+              key={a}
+              type="button"
+              variant={alignment === a ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => setAlignment(a)}
+            >
+              Top-{a[0].toUpperCase() + a.slice(1)}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <label style={{ flex: 1, fontSize: 12 }}>
+          X offset (mm)
+          <Input type="number" min={-30} max={30} step={0.5} value={offsetX} onChange={(e) => setOffsetX(e.target.value)} />
+        </label>
+        <label style={{ flex: 1, fontSize: 12 }}>
+          Y offset (mm)
+          <Input type="number" min={-30} max={30} step={0.5} value={offsetY} onChange={(e) => setOffsetY(e.target.value)} />
+        </label>
+      </div>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={autoFit} onChange={(e) => setAutoFit(e.target.checked)} />
+        <span>Auto-fit scaling (resize into header box, preserve aspect ratio)</span>
+      </label>
+
+      <div style={{ marginTop: 4 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Module Permissions</div>
+        <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+          Select which modules are permitted to print this logo (leave empty to apply to all modules):
+        </div>
+        <LogoModulePicker
+          modules={modules}
+          selected={selected}
+          onToggle={(id) => setSelected((cur) => (cur.includes(id) ? cur.filter((m) => m !== id) : [...cur, id]))}
+          onSelectAll={() => setSelected(modules.map((m) => m.id))}
+          onClearAll={() => setSelected([])}
+        />
+      </div>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
+        <span>Logo is active and enabled for printing</span>
+      </label>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy}
+          onClick={() => onSave({
+            name: name.trim() || logo.name,
+            alignment,
+            offset_x_mm: Number(offsetX) || 0,
+            offset_y_mm: Number(offsetY) || 0,
+            auto_fit_scaling: autoFit,
+            modules: selected,
+            active,
+          })}
+        >
+          {busy ? "Saving…" : "Save changes"}
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>
+          Replace image
+        </Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
+          Cancel
+        </Button>
+        <input ref={fileRef} type="file" accept={ACCEPT} hidden onChange={(e) => { onReplaceImage(e.target.files?.[0]); e.target.value = ""; }} />
       </div>
     </div>
   );

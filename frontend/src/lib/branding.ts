@@ -5,8 +5,23 @@ import { setPrintLogoOverride } from "./printBrand";
 /** Hospital document branding configured in Admin > Branding & Templates. */
 export type BrandingAsset = { mime: string; width_px: number | null; height_px: number | null; url: string; data_uri?: string };
 export type PublicWatermark = { modules: string[]; opacity: number; scale_pct: number; width_px: number | null; height_px: number | null; data_uri: string };
+export type PublicLogo = {
+  id: number;
+  name: string;
+  alignment: "left" | "center" | "right";
+  offset_x_mm: number;
+  offset_y_mm: number;
+  auto_fit_scaling: boolean;
+  modules: string[];
+  width_px: number | null;
+  height_px: number | null;
+  mime: string;
+  url: string;
+  data_uri?: string;
+};
 export type BrandingConfig = {
   watermarks?: PublicWatermark[];
+  logos?: PublicLogo[];
   configured: boolean;
   hospital_title: string;
   title_font_size_pt?: number | null;
@@ -86,7 +101,7 @@ export function brandThanks(): string {
 /** Which document category (watermark "module") the user is currently working in; set by the app shell on navigation. */
 let documentCategory: string | null = null;
 
-const MODULE_CATEGORY: Record<string, string> = {
+export const MODULE_CATEGORY: Record<string, string> = {
   "patient-registration": "op", "queue-management": "op", consultation: "op", "op-management": "op", "doctor-scheduling": "op",
   "follow-up": "op", "doctors-history": "op", patients: "patients", "doctor-prescription": "prescription",
   "bed-management": "ip", "ip-management": "ip", ot: "ip", pharmacy: "pharmacy",
@@ -105,6 +120,26 @@ export function getDocumentCategory(): string | null {
 
 /** Watermark configured for the module the user is in (or for an explicit category), if any. */
 export function getActiveWatermark(category: string | null = documentCategory): PublicWatermark | null {
-  if (!category) return null;
-  return current?.watermarks?.find((w) => w.modules.includes(category)) || null;
+  if (!current?.watermarks || !current.watermarks.length) return null;
+  const cat = category ? (MODULE_CATEGORY[category] || category) : null;
+  if (!cat) {
+    const general = current.watermarks.find((w) => !w.modules?.length || w.modules.includes("all"));
+    return general || current.watermarks[0] || null;
+  }
+  const match = current.watermarks.find((w) => w.modules?.includes(cat) || w.modules?.includes("all") || !w.modules?.length);
+  return match || null;
 }
+
+/** Logos configured for the current document category / module. Returns all active matching logos. */
+export function getActiveLogos(category: string | null = documentCategory): PublicLogo[] {
+  if (!current?.logos || !current.logos.length) return [];
+  const cat = category ? (MODULE_CATEGORY[category] || category) : null;
+  if (!cat) {
+    const general = current.logos.filter((l) => !l.modules?.length || l.modules.includes("all"));
+    return general.length ? general : current.logos;
+  }
+  const matching = current.logos.filter((l) => l.modules?.includes(cat) || l.modules?.includes("all"));
+  if (matching.length) return matching;
+  return current.logos.filter((l) => !l.modules?.length || l.modules.includes("all"));
+}
+

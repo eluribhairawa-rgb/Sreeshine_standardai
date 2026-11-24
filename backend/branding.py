@@ -331,9 +331,77 @@ def get_watermark(module=None, hospital_id=None):
             logger.exception("[branding] watermark lookup failed")
         _WM_CACHE[int(hid)] = hit = (time.monotonic(), rows)
     for r in hit[1]:
-        if module in (r.get("modules") or []):
+        mods = r.get("modules") or []
+        if not module or not mods or module in mods or "all" in mods:
             path = abs_path(r.get("image_path"))
             if path:
                 return {"file": path, "opacity": float(r.get("opacity") or 0.12), "scale_pct": int(r.get("scale_pct") or 60),
                         "width_px": r.get("width_px"), "height_px": r.get("height_px")}
     return None
+
+
+# ---------- multiple logos (per-module / position) ----------
+
+def save_logo_entry(hospital_id, logo_id, data, mime):
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/svg+xml": ".svg"}.get(mime, ".png")
+    os.makedirs(_dir(hospital_id), exist_ok=True)
+    name = f"logo_{int(logo_id)}_{int(time.time())}{ext}"
+    path = os.path.join(_dir(hospital_id), name)
+    with open(path, "wb") as f:
+        f.write(data)
+    return f"branding/{int(hospital_id)}/{name}"
+
+
+_LOGO_CACHE = {}
+
+
+def invalidate_logos(hospital_id=None):
+    if hospital_id is None:
+        _LOGO_CACHE.clear()
+    else:
+        _LOGO_CACHE.pop(int(hospital_id), None)
+
+
+def list_logos(db, hospital_id, active_only=False):
+    rows = db.execute(text("SELECT * FROM document_logos WHERE hospital_id = :h" + (" AND active" if active_only else "") + " ORDER BY id"),
+                      {"h": hospital_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_logos_for_module(module=None, hospital_id=None):
+    """Active logos assigned to `module` (or all modules), or None. Never raises."""
+    module = module or _current_module.get()
+    hid = hospital_id or _current_hospital.get()
+    if not hid:
+        return []
+    hit = _LOGO_CACHE.get(int(hid))
+    if not hit or time.monotonic() - hit[0] >= _TTL:
+        rows = []
+        try:
+            from database import SessionLocal
+            with SessionLocal() as db:
+                rows = list_logos(db, int(hid), active_only=True)
+        except Exception:
+            logger.exception("[branding] logos lookup failed")
+        _LOGO_CACHE[int(hid)] = hit = (time.monotonic(), rows)
+    matched = []
+    for r in hit[1]:
+        mods = r.get("modules") or []
+        if not module or not mods or module in mods or "all" in mods:
+            path = abs_path(r.get("image_path"))
+            if path:
+                matched.append({
+                    "id": r.get("id"),
+                    "name": r.get("name"),
+                    "file": path,
+                    "mime": r.get("image_mime"),
+                    "width_px": r.get("width_px"),
+                    "height_px": r.get("height_px"),
+                    "alignment": r.get("alignment") or "left",
+                    "offset_x_mm": float(r.get("offset_x_mm") or 0),
+                    "offset_y_mm": float(r.get("offset_y_mm") or 0),
+                    "auto_fit_scaling": bool(r.get("auto_fit_scaling")),
+                    "modules": mods,
+                })
+    return matched
+
