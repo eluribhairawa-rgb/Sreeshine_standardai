@@ -7,7 +7,7 @@ import { apiFetch, reportError, getHospitalCode } from "../lib/api";
 import { API_BASE } from "../lib/constants";
 import type { DoctorSchedule, Notice } from "../types";
 import BrandLogo from "../components/BrandLogo";
-import { escapeBrandText, fitMm, useBranding } from "../lib/branding";
+import { escapeBrandText, fitMm, getActiveLogos, useBranding } from "../lib/branding";
 import { buildHospaiPrintFooterCss, printViaIframe } from "../lib/printViaIframe";
 import { patientFilename } from "../lib/exportService";
 import { shareElementAsPdfOnWhatsApp } from "../lib/whatsappPdfShare";
@@ -1497,7 +1497,7 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
           .doctor-rx-sub-header {
             display: none !important;
           }
-          ${buildHospaiPrintFooterCss()}
+          ${buildHospaiPrintFooterCss("prescription")}
           @page { margin-top: 10mm; }
           .doctor-rx-sheet { box-sizing: border-box !important; }
           .rx-sheet-table tr, .rx-sheet-signature-block, .rx-sheet-footer { page-break-inside: avoid; }
@@ -3335,8 +3335,27 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
                 const titleText = (docBrand?.hospital_title || "").trim();
                 const tLen = titleText.length;
                 const rxFontSize = tLen > 45 ? "15px" : tLen > 32 ? "18px" : tLen > 22 ? "21px" : "24px";
-                const hasLogo = !!docBrand?.logo?.data_uri;
-                const align = docBrand?.logo_alignment || "left";
+                const activeLogos = getActiveLogos("prescription");
+                const logos = activeLogos.length > 0
+                  ? activeLogos
+                  : (docBrand?.logo?.data_uri
+                    ? [{
+                        data_uri: docBrand.logo.data_uri,
+                        width_px: docBrand.logo.width_px,
+                        height_px: docBrand.logo.height_px,
+                        alignment: docBrand.logo_alignment || "left",
+                        offset_x_mm: docBrand.logo_offset_x_mm ?? 0,
+                        offset_y_mm: docBrand.logo_offset_y_mm ?? 0,
+                        auto_fit_scaling: docBrand.auto_fit_scaling,
+                      }]
+                    : []);
+                const hasLogo = logos.length > 0;
+                const leftLogo = logos.find((l) => (l.alignment || "left") === "left");
+                const rightLogo = logos.find((l) => l.alignment === "right");
+                const centerLogo = logos.find((l) => l.alignment === "center");
+                const boxW = docBrand?.logo_box_mm?.[0] ?? 86;
+                const boxH = docBrand?.logo_box_mm?.[1] ?? 27;
+
                 const titleCol = (
                   <div className="rx-sheet-title-col" style={{ flex: 1, minWidth: 0, textAlign: hasLogo && !titleText ? "left" : "center", alignItems: "center" }}>
                     <div className="rx-sheet-brand-name" style={{ fontSize: rxFontSize, wordBreak: "break-word", whiteSpace: "pre-line" }}>
@@ -3354,33 +3373,47 @@ export default function DoctorPrescriptionPage({ setNotice, onOpenPatient, onNav
                     </div>
                   );
                 }
-                const [lw, lh] = fitMm(docBrand!.logo!.width_px, docBrand!.logo!.height_px, docBrand!.logo_box_mm[0], docBrand!.logo_box_mm[1], docBrand!.auto_fit_scaling);
-                // Negative Y offsets pushed the logo past the top edge and clipped it in print.
-                const safeOffsetY = Math.max(docBrand!.logo_offset_y_mm ?? 0, -2.5);
-                const logoImg = (
-                  <img
-                    src={docBrand!.logo!.data_uri}
-                    alt={docBrand!.hospital_title || "Hospital logo"}
-                    style={{ display: "block", width: `${lw}mm`, height: `${lh}mm`, maxWidth: "100%", objectFit: "contain", position: "relative", left: `${docBrand!.logo_offset_x_mm ?? 0}mm`, top: `${safeOffsetY}mm` }}
-                  />
-                );
-                const slot = (justify: string, visible: boolean) => (
-                  <div style={{ flexShrink: 0, width: `${lw}mm`, display: "flex", alignItems: "center", justifyContent: justify, overflow: "visible", visibility: visible ? "visible" : "hidden" }}>
-                    {visible ? logoImg : null}
+
+                const renderImg = (l: typeof logos[number]) => {
+                  const [lw, lh] = fitMm(l.width_px, l.height_px, boxW, boxH, l.auto_fit_scaling);
+                  const safeOffsetY = Math.max(l.offset_y_mm ?? 0, -2.5);
+                  return {
+                    lw,
+                    el: (
+                      <img
+                        src={l.data_uri}
+                        alt={docBrand?.hospital_title || "Hospital logo"}
+                        style={{ display: "block", width: `${lw}mm`, height: `${lh}mm`, maxWidth: "100%", objectFit: "contain", position: "relative", left: `${l.offset_x_mm ?? 0}mm`, top: `${safeOffsetY}mm` }}
+                      />
+                    ),
+                  };
+                };
+
+                const wrap: React.CSSProperties = { width: "100%", display: "flex", alignItems: "center", gap: "3mm", padding: "2.5mm 0", overflow: "visible" };
+                if (centerLogo && !leftLogo && !rightLogo) {
+                  const c = renderImg(centerLogo);
+                  if (!titleText) return <div style={{ ...wrap, justifyContent: "center" }}>{c.el}</div>;
+                  return <div style={{ ...wrap, flexDirection: "column", justifyContent: "center" }}>{c.el}{titleCol}</div>;
+                }
+                const lImg = leftLogo ? renderImg(leftLogo) : null;
+                const rImg = rightLogo ? renderImg(rightLogo) : null;
+                if (!titleText) {
+                  if (lImg && rImg) return <div style={{ ...wrap, justifyContent: "space-between" }}>{lImg.el}{rImg.el}</div>;
+                  const j = rImg ? "flex-end" : "flex-start";
+                  return <div style={{ ...wrap, justifyContent: j }}>{(lImg || rImg)!.el}</div>;
+                }
+                const spacerW = (lImg || rImg)!.lw;
+                return (
+                  <div style={{ ...wrap, justifyContent: "space-between" }}>
+                    <div style={{ flexShrink: 0, width: `${lImg ? lImg.lw : spacerW}mm`, display: "flex", alignItems: "center", justifyContent: "flex-start", overflow: "visible", visibility: lImg ? "visible" : "hidden" }}>
+                      {lImg ? lImg.el : null}
+                    </div>
+                    {titleCol}
+                    <div style={{ flexShrink: 0, width: `${rImg ? rImg.lw : spacerW}mm`, display: "flex", alignItems: "center", justifyContent: "flex-end", overflow: "visible", visibility: rImg ? "visible" : "hidden" }}>
+                      {rImg ? rImg.el : null}
+                    </div>
                   </div>
                 );
-                const wrap: React.CSSProperties = { width: "100%", display: "flex", alignItems: "center", gap: "3mm", padding: "2.5mm 0", overflow: "visible" };
-                if (!titleText) {
-                  const j = align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start";
-                  return <div style={{ ...wrap, justifyContent: j }}>{logoImg}</div>;
-                }
-                if (align === "center") {
-                  return <div style={{ ...wrap, flexDirection: "column", justifyContent: "center" }}>{logoImg}{titleCol}</div>;
-                }
-                if (align === "right") {
-                  return <div style={{ ...wrap, justifyContent: "space-between" }}>{slot("flex-start", false)}{titleCol}{slot("flex-end", true)}</div>;
-                }
-                return <div style={{ ...wrap, justifyContent: "space-between" }}>{slot("flex-start", true)}{titleCol}{slot("flex-end", false)}</div>;
               })()}
             </div>
 
