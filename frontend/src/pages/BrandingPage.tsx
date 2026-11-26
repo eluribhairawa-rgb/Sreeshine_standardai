@@ -41,6 +41,26 @@ type LogoDraft = {
   modules: string[];
 };
 
+type FooterItem = {
+  id: number;
+  name: string;
+  image_url: string | null;
+  width_px: number | null;
+  height_px: number | null;
+  footer_text: string;
+  modules: string[];
+  active: boolean;
+};
+type FooterList = { footers: FooterItem[]; modules: { id: string; label: string }[] };
+type FooterDraft = {
+  key: string;
+  file?: File;
+  url?: string;
+  name: string;
+  footerText: string;
+  modules: string[];
+};
+
 const PX_PER_MM = 3; // preview scale: 180mm content width -> 540px
 const ACCEPT = ".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
 
@@ -68,6 +88,15 @@ export default function BrandingPage({ setNotice }: Props) {
   const logoDraftsRef = useRef<LogoDraft[]>([]);
   logoDraftsRef.current = logoDrafts;
   useEffect(() => () => { logoDraftsRef.current.forEach((d) => URL.revokeObjectURL(d.url)); }, []);
+
+  // ---- multiple footers (with module permissions & disclaimers) ----
+  const [footerList, setFooterList] = useState<FooterItem[]>([]);
+  const [footerDrafts, setFooterDrafts] = useState<FooterDraft[]>([]);
+  const [footerEditing, setFooterEditing] = useState<number | null>(null);
+  const multiFooterInput = useRef<HTMLInputElement>(null);
+  const footerDraftsRef = useRef<FooterDraft[]>([]);
+  footerDraftsRef.current = footerDrafts;
+  useEffect(() => () => { footerDraftsRef.current.forEach((d) => d.url && URL.revokeObjectURL(d.url)); }, []);
 
   // ---- watermarks (per module) ----
   const [wmList, setWmList] = useState<Watermark[]>([]);
@@ -113,6 +142,13 @@ export default function BrandingPage({ setNotice }: Props) {
   };
   useEffect(() => {
     apiFetch<LogoList>("/api/branding/logos").then(applyLogos).catch(() => {});
+  }, []);
+
+  const applyFooters = (data: FooterList) => {
+    setFooterList(data.footers || []);
+  };
+  useEffect(() => {
+    apiFetch<FooterList>("/api/branding/footers").then(applyFooters).catch(() => {});
   }, []);
 
   const baseUrl = (API_BASE || "").replace(/\/+$/, "").replace(/\/api$/, "");
@@ -233,6 +269,145 @@ export default function BrandingPage({ setNotice }: Props) {
       applyLogos(data);
       await refreshGlobal();
       setNotice({ type: "success", message: `Updated image for "${logo.name}".` });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // ---- multi-footer operations ----
+  const addFooterDraftFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    const added: FooterDraft[] = Array.from(files).map((file, i) => ({
+      key: `${Date.now()}-${i}-${file.name}`,
+      file,
+      url: URL.createObjectURL(file),
+      name: file.name.replace(/\.[^.]+$/, "").slice(0, 100),
+      footerText: "",
+      modules: [],
+    }));
+    setFooterDrafts((cur) => [...cur, ...added]);
+    setError("");
+  };
+
+  const addEmptyFooterDraft = () => {
+    const draft: FooterDraft = {
+      key: `${Date.now()}-text-footer`,
+      name: "Custom Module Footer",
+      footerText: "",
+      modules: [],
+    };
+    setFooterDrafts((cur) => [...cur, draft]);
+    setError("");
+  };
+
+  const patchFooterDraft = (key: string, patch: Partial<FooterDraft>) =>
+    setFooterDrafts((cur) => cur.map((d) => (d.key === key ? { ...d, ...patch } : d)));
+
+  const removeFooterDraft = (key: string) =>
+    setFooterDrafts((cur) => {
+      cur.filter((d) => d.key === key && d.url).forEach((d) => URL.revokeObjectURL(d.url!));
+      return cur.filter((d) => d.key !== key);
+    });
+
+  const saveFooterDrafts = async () => {
+    for (const d of footerDrafts) {
+      if (!d.name.trim()) return setError("Give every footer a name.");
+    }
+    setBusy("footer-add");
+    setError("");
+    try {
+      for (const d of footerDrafts) {
+        const body = new FormData();
+        body.append("name", d.name.trim());
+        body.append("footer_text", d.footerText.trim());
+        body.append("modules", d.modules.join(","));
+        if (d.file) body.append("file", d.file);
+        const response = await fetch(`${baseUrl}/api/branding/footers`, {
+          method: "POST",
+          body,
+          credentials: "include",
+          headers: { "X-Hospital-Code": getHospitalCode() },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : data?.error || "Failed to save footer.");
+        applyFooters(data);
+      }
+      footerDrafts.forEach((d) => d.url && URL.revokeObjectURL(d.url));
+      setFooterDrafts([]);
+      await refreshGlobal();
+      setNotice({ type: "success", message: "Footer(s) saved successfully." });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const updateFooterItem = async (footer: FooterItem, patch: Partial<FooterItem>) => {
+    setBusy(`footer-${footer.id}`);
+    setError("");
+    try {
+      applyFooters(await apiFetch<FooterList>(`/api/branding/footers/${footer.id}`, { method: "PUT", body: JSON.stringify({ ...footer, ...patch }) }));
+      await refreshGlobal();
+      setNotice({ type: "success", message: "Footer updated." });
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const replaceFooterImage = async (footer: FooterItem, file: File | undefined | null) => {
+    if (!file) return;
+    setBusy(`footer-${footer.id}`);
+    setError("");
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch(`${baseUrl}/api/branding/footers/${footer.id}/image`, {
+        method: "POST",
+        body,
+        credentials: "include",
+        headers: { "X-Hospital-Code": getHospitalCode() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : data?.error || "Failed to update image.");
+      applyFooters(data);
+      await refreshGlobal();
+      setNotice({ type: "success", message: "Footer image replaced." });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const removeFooterItemImage = async (footer: FooterItem) => {
+    setBusy(`footer-${footer.id}`);
+    setError("");
+    try {
+      applyFooters(await apiFetch<FooterList>(`/api/branding/footers/${footer.id}/image`, { method: "DELETE" }));
+      await refreshGlobal();
+      setNotice({ type: "success", message: "Footer image removed." });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const deleteFooterItem = async (footer: FooterItem) => {
+    if (!window.confirm(`Delete footer "${footer.name}"?`)) return;
+    setBusy(`footer-${footer.id}`);
+    setError("");
+    try {
+      applyFooters(await apiFetch<FooterList>(`/api/branding/footers/${footer.id}`, { method: "DELETE" }));
+      await refreshGlobal();
+      setNotice({ type: "success", message: "Footer deleted." });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -482,6 +657,17 @@ export default function BrandingPage({ setNotice }: Props) {
   const previewRightLogo = moduleLogos.find((l) => l.alignment === "right");
   const previewCenterLogo = moduleLogos.find((l) => l.alignment === "center");
   const hasMultipleLogos = moduleLogos.length > 0;
+
+  const matchedFooter = footerList.find((f) => {
+    if (!f.active) return false;
+    if (previewModule === "all") return !f.modules.length || f.modules.includes("all");
+    return f.modules.includes(previewModule);
+  }) || footerList.find((f) => f.active && (!f.modules.length || f.modules.includes("all")));
+
+  const previewFooterImage = matchedFooter?.image_url ? `${baseUrl}${matchedFooter.image_url}` : (footerSrc || logoSrc);
+  const previewFooterText = (matchedFooter?.footer_text?.trim() !== undefined && matchedFooter?.footer_text?.trim() !== "")
+    ? matchedFooter.footer_text.trim()
+    : (footerText?.trim() || `Thank you for choosing ${trimmedTitle.replace(/[\r\n]+/g, ", ") || "HospAI"}.`);
 
   const renderHeaderLogo = (item: LogoItem) => {
     const [w, h] = fitMm(item.width_px, item.height_px, logoBox[0], logoBox[1], item.auto_fit_scaling);
@@ -860,22 +1046,224 @@ export default function BrandingPage({ setNotice }: Props) {
         </section>
 
         <section style={section}>
-          <h3 style={{ margin: "0 0 10px" }}>Footer</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <h3 style={{ margin: 0 }}>Footers & Disclaimers</h3>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!!busy}
+                onClick={addEmptyFooterDraft}
+              >
+                + Add Text Footer
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                disabled={!!busy}
+                onClick={() => multiFooterInput.current?.click()}
+              >
+                + Upload Footer Image
+              </Button>
+            </div>
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
+            Add multiple footers with custom disclaimer text (e.g. Pharmacy return policy, Lab pathologist certification, Billing jurisdiction) and optional center badge images. Choose module permissions for each footer.
+          </p>
+
           <div
             style={drop("footer")}
-            onClick={() => footerInput.current?.click()}
+            onClick={() => multiFooterInput.current?.click()}
             onDragOver={(e) => { e.preventDefault(); setDragging("footer"); }}
             onDragLeave={() => setDragging("")}
-            onDrop={onDrop("footer")}
-            role="button" tabIndex={0}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") footerInput.current?.click(); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging("");
+              addFooterDraftFiles(e.dataTransfer.files);
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") multiFooterInput.current?.click(); }}
           >
-            {busy === "footer" ? "Uploading…" : cfg.footer ? "Drop or click to replace the footer image" : "Optional footer image (PNG, JPG or SVG)"}
+            {busy === "footer-add" ? "Uploading footers…" : "Drop one or more footer badge images here or click to browse"}
+            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+              PNG, JPG or SVG · up to 5 MB each
+            </div>
           </div>
-          <input ref={footerInput} type="file" accept={ACCEPT} hidden onChange={(e) => { void upload("footer", e.target.files?.[0]); e.target.value = ""; }} />
-          {cfg.footer && <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeAsset("footer")} style={{ marginTop: 8 }}>Remove footer image</Button>}
-          <label htmlFor="branding-footer-text" className="muted" style={{ fontSize: 12, display: "block", marginTop: 12 }}>Footer / disclaimer text</label>
-          <Textarea id="branding-footer-text" rows={3} maxLength={500} value={footerText} onChange={(e) => setFooterText(e.target.value)} placeholder="Leave blank for “Thank you for choosing …”" />
+          <input
+            ref={multiFooterInput}
+            type="file"
+            multiple
+            accept={ACCEPT}
+            hidden
+            onChange={(e) => {
+              addFooterDraftFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+
+          {/* DRAFTS */}
+          {footerDrafts.length > 0 && (
+            <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#1e293b" }}>New Footers to Add ({footerDrafts.length})</div>
+              {footerDrafts.map((d, idx) => (
+                <div key={d.key} style={{ border: "1px solid #93c5fd", borderRadius: 10, padding: 12, background: "#f8fafc" }}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
+                    {d.url ? (
+                      <img
+                        src={d.url}
+                        alt=""
+                        style={{ width: 56, height: 56, objectFit: "contain", border: "1px solid #cbd5e1", borderRadius: 8, background: "#fff", flexShrink: 0 }}
+                      />
+                    ) : (
+                      <div style={{ width: 56, height: 56, border: "1px solid #cbd5e1", borderRadius: 8, background: "#fff", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>
+                        📝
+                      </div>
+                    )}
+                    <label style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>
+                      Footer {idx + 1} Name
+                      <Input
+                        value={d.name}
+                        maxLength={100}
+                        placeholder="e.g. Pharmacy Return Policy, Lab Accreditation Footer"
+                        onChange={(e) => patchFooterDraft(d.key, { name: e.target.value })}
+                      />
+                    </label>
+                    <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => removeFooterDraft(d.key)}>
+                      Remove
+                    </Button>
+                  </div>
+
+                  <label style={{ fontSize: 12, fontWeight: 600, display: "block", marginBottom: 10 }}>
+                    Footer / Disclaimer Text
+                    <Textarea
+                      rows={2}
+                      maxLength={500}
+                      value={d.footerText}
+                      onChange={(e) => patchFooterDraft(d.key, { footerText: e.target.value })}
+                      placeholder="Leave blank for default “Thank you for choosing …”"
+                    />
+                  </label>
+
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Module Permissions</div>
+                    <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+                      Select which modules this footer should appear on (leave empty to apply to all modules):
+                    </div>
+                    <LogoModulePicker
+                      modules={activeModulesList}
+                      selected={d.modules}
+                      onToggle={(id) =>
+                        patchFooterDraft(d.key, {
+                          modules: d.modules.includes(id) ? d.modules.filter((m) => m !== id) : [...d.modules, id],
+                        })
+                      }
+                      onSelectAll={() => patchFooterDraft(d.key, { modules: activeModulesList.map((m) => m.id) })}
+                      onClearAll={() => patchFooterDraft(d.key, { modules: [] })}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <div>
+                <Button variant="primary" disabled={!!busy} onClick={saveFooterDrafts}>
+                  {busy === "footer-add" ? "Saving footers…" : footerDrafts.length > 1 ? `Save ${footerDrafts.length} footers` : "Save footer"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* SAVED FOOTERS */}
+          {footerList.length > 0 && (
+            <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#1e293b" }}>Saved Footers ({footerList.length})</div>
+              {footerList.map((footer) => {
+                const isEditing = footerEditing === footer.id;
+                const isRowBusy = busy === `footer-${footer.id}`;
+                return (
+                  <div key={footer.id} style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, background: "#fff", opacity: footer.active ? 1 : 0.6 }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <div style={{ width: 56, height: 56, flexShrink: 0, border: "1px solid #e2e8f0", borderRadius: 8, background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                        {footer.image_url ? (
+                          <img src={`${baseUrl}${footer.image_url}`} alt={footer.name} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                        ) : (
+                          <span style={{ fontSize: 20 }}>📝</span>
+                        )}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, color: "#0f172a", fontSize: 14 }}>{footer.name}</span>
+                          {!footer.active && <span className="muted" style={{ fontSize: 11 }}>· Disabled</span>}
+                        </div>
+                        {footer.footer_text && (
+                          <div style={{ fontSize: 12, color: "#475569", marginTop: 2, fontStyle: "italic" }}>
+                            "{footer.footer_text}"
+                          </div>
+                        )}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                          {footer.modules.length === 0 ? (
+                            <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#f0fdf4", color: "#166534", fontWeight: 600 }}>
+                              All Modules (Default)
+                            </span>
+                          ) : (
+                            footer.modules.map((m) => (
+                              <span key={m} style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#f1f5f9", color: "#334155", fontWeight: 500 }}>
+                                {logoModuleLabel(m)}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <Button size="sm" variant="secondary" disabled={isRowBusy} onClick={() => setFooterEditing(isEditing ? null : footer.id)}>
+                          {isEditing ? "Close" : "Edit permissions"}
+                        </Button>
+                        <Button size="sm" variant="ghost" disabled={isRowBusy} onClick={() => deleteFooterItem(footer)}>
+                          Delete
+                        </Button>
+                      </div>
+                    </div>
+                    {isEditing && (
+                      <FooterEditor
+                        footer={footer}
+                        modules={activeModulesList}
+                        busy={isRowBusy}
+                        onSave={async (patch) => {
+                          if (await updateFooterItem(footer, patch)) setFooterEditing(null);
+                        }}
+                        onReplaceImage={(file) => replaceFooterImage(footer, file)}
+                        onRemoveImage={() => removeFooterItemImage(footer)}
+                        onClose={() => setFooterEditing(null)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Legacy single footer fallback (when no multiple footers exist) */}
+          {footerList.length === 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={drop("footer")}
+                onClick={() => footerInput.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); setDragging("footer"); }}
+                onDragLeave={() => setDragging("")}
+                onDrop={onDrop("footer")}
+                role="button" tabIndex={0}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") footerInput.current?.click(); }}
+              >
+                {busy === "footer" ? "Uploading…" : cfg?.footer ? "Drop or click to replace the footer image" : "Optional footer image (PNG, JPG or SVG)"}
+              </div>
+              <input ref={footerInput} type="file" accept={ACCEPT} hidden onChange={(e) => { void upload("footer", e.target.files?.[0]); e.target.value = ""; }} />
+              {cfg?.footer && <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeAsset("footer")} style={{ marginTop: 8 }}>Remove footer image</Button>}
+              <label htmlFor="branding-footer-text" className="muted" style={{ fontSize: 12, display: "block", marginTop: 12 }}>Footer / disclaimer text</label>
+              <Textarea id="branding-footer-text" rows={3} maxLength={500} value={footerText} onChange={(e) => setFooterText(e.target.value)} placeholder="Leave blank for “Thank you for choosing …”" />
+            </div>
+          )}
         </section>
 
         <section style={section}>
@@ -1123,9 +1511,9 @@ export default function BrandingPage({ setNotice }: Props) {
               <div style={{ position: "relative", marginTop: 14 }}>
                 <div style={{ display: "flex", alignItems: "center", width: "100%", marginBottom: 6 }}>
                   <div style={{ flex: 1, borderTop: "1.5px solid #000" }} />
-                  {(footerSrc || logoSrc) && (
+                  {(previewFooterImage || footerSrc || logoSrc) && (
                     <img
-                      src={footerSrc || logoSrc}
+                      src={previewFooterImage || footerSrc || logoSrc}
                       alt="Footer badge preview"
                       style={{
                         height: 20,
@@ -1140,7 +1528,7 @@ export default function BrandingPage({ setNotice }: Props) {
                   <div style={{ flex: 1, borderTop: "1.5px solid #000" }} />
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", font: "italic 7.5pt Arial, sans-serif" }}>
-                  <span>{footerText.trim() || `Thank you for choosing ${title.trim().replace(/[\r\n]+/g, ", ") || "HospAI"}.`}</span>
+                  <span>{previewFooterText}</span>
                   <span>Page 1 of 1</span>
                 </div>
               </div>
@@ -1386,6 +1774,97 @@ function LogoEditor({
         <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>
           Replace image
         </Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
+          Cancel
+        </Button>
+        <input ref={fileRef} type="file" accept={ACCEPT} hidden onChange={(e) => { onReplaceImage(e.target.files?.[0]); e.target.value = ""; }} />
+      </div>
+    </div>
+  );
+}
+
+function FooterEditor({
+  footer,
+  modules,
+  busy,
+  onSave,
+  onReplaceImage,
+  onRemoveImage,
+  onClose,
+}: {
+  footer: FooterItem;
+  modules: { id: string; label: string }[];
+  busy: boolean;
+  onSave: (patch: Partial<FooterItem>) => void | Promise<void>;
+  onReplaceImage: (file: File | undefined | null) => void;
+  onRemoveImage: () => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(footer.name);
+  const [footerText, setFooterText] = useState(footer.footer_text || "");
+  const [selected, setSelected] = useState<string[]>(footer.modules || []);
+  const [active, setActive] = useState(footer.active !== false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #e2e8f0", display: "grid", gap: 10 }}>
+      <label style={{ fontSize: 12, fontWeight: 600 }}>
+        Footer Name
+        <Input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacy Disclaimer or General Footer" />
+      </label>
+
+      <label style={{ fontSize: 12, fontWeight: 600 }}>
+        Footer / Disclaimer Text
+        <Textarea
+          rows={3}
+          maxLength={500}
+          value={footerText}
+          onChange={(e) => setFooterText(e.target.value)}
+          placeholder="Leave blank for default “Thank you for choosing …”"
+        />
+      </label>
+
+      <div style={{ marginTop: 4 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Module Permissions</div>
+        <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+          Select which modules are permitted to print this footer (leave empty to apply to all modules):
+        </div>
+        <LogoModulePicker
+          modules={modules}
+          selected={selected}
+          onToggle={(id) => setSelected((cur) => (cur.includes(id) ? cur.filter((m) => m !== id) : [...cur, id]))}
+          onSelectAll={() => setSelected(modules.map((m) => m.id))}
+          onClearAll={() => setSelected([])}
+        />
+      </div>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
+        <span>Footer is active and enabled for printing</span>
+      </label>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy}
+          onClick={() => onSave({
+            name: name.trim() || footer.name,
+            footer_text: footerText.trim(),
+            modules: selected,
+            active,
+          })}
+        >
+          {busy ? "Saving…" : "Save changes"}
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>
+          {footer.image_url ? "Replace badge image" : "Add badge image"}
+        </Button>
+        {footer.image_url && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onRemoveImage}>
+            Remove image
+          </Button>
+        )}
         <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
           Cancel
         </Button>

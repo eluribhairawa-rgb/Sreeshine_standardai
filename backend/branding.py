@@ -35,7 +35,8 @@ _current_hospital = contextvars.ContextVar("branding_hospital_id", default=None)
 @contextmanager
 def use_hospital(hospital_id):
     """Scope `get_branding()` (no argument) to a hospital while a PDF is built."""
-    token = _current_hospital.set(int(hospital_id) if hospital_id else None)
+    val = int(hospital_id) if hospital_id else _current_hospital.get()
+    token = _current_hospital.set(val)
     try:
         yield
     finally:
@@ -275,7 +276,8 @@ def use_module(module):
     """Scope `get_watermark()` (no argument) to a module while a PDF is built."""
     if module and module in MODULE_ALIASES:
         module = MODULE_ALIASES[module]
-    token = _current_module.set(module if module in WATERMARK_MODULE_IDS else None)
+    val = module if (module and module in WATERMARK_MODULE_IDS) else _current_module.get()
+    token = _current_module.set(val)
     try:
         yield
     finally:
@@ -432,4 +434,92 @@ def get_logos_for_module(module=None, hospital_id=None):
                     "modules": mods,
                 })
     return matched
+
+
+# ---------- multiple footers (per-module / custom disclaimers) ----------
+
+def save_footer_entry(hospital_id, footer_id, data, mime):
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/svg+xml": ".svg"}.get(mime, ".png")
+    os.makedirs(_dir(hospital_id), exist_ok=True)
+    name = f"footer_{int(footer_id)}_{int(time.time())}{ext}"
+    path = os.path.join(_dir(hospital_id), name)
+    with open(path, "wb") as f:
+        f.write(data)
+    return f"branding/{int(hospital_id)}/{name}"
+
+
+_FOOTER_CACHE = {}
+
+
+def invalidate_footers(hospital_id=None):
+    if hospital_id is None:
+        _FOOTER_CACHE.clear()
+    else:
+        _FOOTER_CACHE.pop(int(hospital_id), None)
+
+
+def list_footers(db, hospital_id, active_only=False):
+    rows = db.execute(
+        text("SELECT * FROM document_footers WHERE hospital_id = :h" + (" AND active" if active_only else "") + " ORDER BY id"),
+        {"h": hospital_id}
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_footer(module=None, hospital_id=None):
+    """Active footer assigned to `module` (image file + text), or None. Never raises."""
+    module = module or _current_module.get()
+    if module and module in MODULE_ALIASES:
+        module = MODULE_ALIASES[module]
+    hid = hospital_id or _current_hospital.get()
+    if not hid:
+        return None
+    hit = _FOOTER_CACHE.get(int(hid))
+    if not hit or time.monotonic() - hit[0] >= _TTL:
+        rows = []
+        try:
+            from database import SessionLocal
+            with SessionLocal() as db:
+                rows = list_footers(db, int(hid), active_only=True)
+        except Exception:
+            logger.exception("[branding] footers lookup failed")
+        _FOOTER_CACHE[int(hid)] = hit = (time.monotonic(), rows)
+    # 1. Match specific module first
+    if module:
+        for r in hit[1]:
+            mods = r.get("modules") or []
+            if module in mods:
+                path = abs_path(r.get("image_path")) if r.get("image_path") else None
+                return {
+                    "id": r.get("id"),
+                    "name": r.get("name"),
+                    "file": path,
+                    "mime": r.get("image_mime"),
+                    "width_px": r.get("width_px"),
+                    "height_px": r.get("height_px"),
+                    "footer_text": r.get("footer_text"),
+                    "modules": mods,
+                }
+    # 2. Fallback to general (empty modules or "all")
+    for r in hit[1]:
+        mods = r.get("modules") or []
+        if not mods or "all" in mods:
+            path = abs_path(r.get("image_path")) if r.get("image_path") else None
+            return {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "file": path,
+                "mime": r.get("image_mime"),
+                "width_px": r.get("width_px"),
+                "height_px": r.get("height_px"),
+                "footer_text": r.get("footer_text"),
+                "modules": mods,
+            }
+    return None
+
+
+def get_footers_for_module(module=None, hospital_id=None):
+    """All active footers assigned to `module` (or all modules). Never raises."""
+    f = get_footer(module=module, hospital_id=hospital_id)
+    return [f] if f else []
 

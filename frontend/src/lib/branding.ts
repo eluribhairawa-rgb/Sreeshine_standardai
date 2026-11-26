@@ -19,9 +19,22 @@ export type PublicLogo = {
   url: string;
   data_uri?: string;
 };
+export type PublicFooter = {
+  id: number;
+  name: string;
+  image_url: string | null;
+  data_uri?: string;
+  width_px: number | null;
+  height_px: number | null;
+  mime?: string;
+  footer_text: string | null;
+  modules: string[];
+  active: boolean;
+};
 export type BrandingConfig = {
   watermarks?: PublicWatermark[];
   logos?: PublicLogo[];
+  footers?: PublicFooter[];
   configured: boolean;
   hospital_title: string;
   title_font_size_pt?: number | null;
@@ -141,5 +154,18 @@ export function getActiveLogos(category: string | null = documentCategory): Publ
   const matching = current.logos.filter((l) => l.modules?.includes(cat) || l.modules?.includes("all"));
   if (matching.length) return matching;
   return current.logos.filter((l) => !l.modules?.length || l.modules.includes("all"));
+}
+
+/** Footer configured for the current document category / module. */
+export function getActiveFooter(category: string | null = documentCategory): PublicFooter | null {
+  if (!current?.footers || !current.footers.length) return null;
+  const cat = category ? (MODULE_CATEGORY[category] || category) : null;
+  if (!cat) {
+    const general = current.footers.find((f) => f.active && (!f.modules?.length || f.modules.includes("all")));
+    return general || current.footers.find((f) => f.active) || null;
+  }
+  const match = current.footers.find((f) => f.active && f.modules?.includes(cat));
+  if (match) return match;
+  return current.footers.find((f) => f.active && (!f.modules?.length || f.modules.includes("all"))) || null;
 }
 

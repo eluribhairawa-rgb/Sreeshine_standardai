@@ -1,5 +1,5 @@
 import { PRINT_BRAND_HEADER_DATA_URI } from "./printBrand";
-import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveLogos, getActiveWatermark, getBranding, getDocumentCategory } from "./branding";
+import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveFooter, getActiveLogos, getActiveWatermark, getBranding, getDocumentCategory } from "./branding";
 
 /**
  * printViaIframe – shared print utility
@@ -41,12 +41,15 @@ const FOOTER_TEXT_BOX = `
  * so it prints even with "Background graphics" unchecked. !important keeps a
  * document's own smaller @page margin from squeezing the footer out.
  */
-export function buildHospaiPrintFooterCss(): string {
+export function buildHospaiPrintFooterCss(category?: string): string {
   const b = getBranding();
-  const raw = b?.footer_text || brandThanks();
+  const activeFooter = getActiveFooter(category || getDocumentCategory());
+  const raw = activeFooter?.footer_text || b?.footer_text || brandThanks();
   // CSS string literal: escape backslash/quote and flatten newlines.
   const cssText = raw.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ");
-  const footerAsset = b?.footer?.data_uri ? b.footer : b?.logo?.data_uri ? b.logo : null;
+  const activeLogos = getActiveLogos(category || getDocumentCategory());
+  const primaryLogo = activeLogos[0] || null;
+  const footerAsset = (activeFooter?.data_uri ? activeFooter : null) || (b?.footer?.data_uri ? b.footer : (b?.logo?.data_uri ? b.logo : primaryLogo));
   let centre = `@bottom-center { content: image-set(url("${PRINT_BRAND_HEADER_DATA_URI}") 20x); width: 16mm; margin-top: 1.5mm; vertical-align: top; text-align: center; }`;
   if (footerAsset?.data_uri) {
     const [w, h] = fitMm(footerAsset.width_px, footerAsset.height_px, 14, 8, true);

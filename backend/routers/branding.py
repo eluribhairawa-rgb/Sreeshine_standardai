@@ -60,6 +60,7 @@ def public_branding(db: Session = Depends(get_db), user: dict = Depends(get_curr
     out = _serialize(svc.fetch_row(db, hospital_id), with_data=True)
     out["watermarks"] = _public_watermarks(db, hospital_id)
     out["logos"] = _public_logos(db, hospital_id)
+    out["footers"] = _public_footers(db, hospital_id)
     return out
 
 
@@ -68,6 +69,7 @@ def get_branding_settings(db: Session = Depends(get_db), user: dict = Depends(re
                           hospital_id: int = Depends(current_hospital_id)):
     out = _serialize(svc.fetch_row(db, hospital_id))
     out["logos"] = [_logo_serialize(r) for r in svc.list_logos(db, hospital_id)]
+    out["footers"] = [_footer_serialize(r) for r in svc.list_footers(db, hospital_id)]
     return out
 
 
@@ -399,6 +401,30 @@ def _public_logos(db, hospital_id):
     return out
 
 
+def _public_footers(db, hospital_id):
+    out = []
+    for r in svc.list_footers(db, hospital_id, active_only=True):
+        path = svc.abs_path(r.get("image_path")) if r.get("image_path") else None
+        mime = r.get("image_mime") or "image/png"
+        uri = None
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                uri = f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+        out.append({
+            "id": r["id"],
+            "name": r["name"],
+            "modules": list(r.get("modules") or []),
+            "width_px": r.get("width_px"),
+            "height_px": r.get("height_px"),
+            "mime": mime,
+            "footer_text": r.get("footer_text") or "",
+            "active": bool(r.get("active", True)),
+            "url": f"/api/branding/footer-asset/{r['id']}" if path else None,
+            "data_uri": uri,
+        })
+    return out
+
+
 async def _logo_response(db, hospital_id):
     return {
         "logos": [_logo_serialize(r) for r in svc.list_logos(db, hospital_id)],
@@ -544,6 +570,186 @@ def get_logo_asset(logo_id: int, db: Session = Depends(get_db), user: dict = Dep
     row = _get_logo(db, hospital_id, logo_id)
     path = svc.abs_path(row.get("image_path"))
     if not path:
+        raise HTTPException(404, "Not found")
+    with open(path, "rb") as f:
+        body = f.read()
+    return Response(body, media_type=row.get("image_mime") or "image/png", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"})
+
+
+# ---------- multiple footers (per-module disclaimers / images) ----------
+
+def _footer_serialize(r):
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "image_url": f"/api/branding/footer-asset/{r['id']}" if r.get("image_path") else None,
+        "width_px": r.get("width_px"),
+        "height_px": r.get("height_px"),
+        "footer_text": r.get("footer_text") or "",
+        "modules": list(r.get("modules") or []),
+        "active": bool(r.get("active", True)),
+        "created_at": r["created_at"].isoformat() if hasattr(r.get("created_at"), "isoformat") else str(r.get("created_at") or ""),
+    }
+
+
+async def _footer_response(db, hospital_id):
+    return {
+        "footers": [_footer_serialize(r) for r in svc.list_footers(db, hospital_id)],
+        "modules": [{"id": m, "label": l} for m, l in svc.WATERMARK_MODULES],
+    }
+
+
+def _get_footer(db, hospital_id, footer_id):
+    row = db.execute(text("SELECT * FROM document_footers WHERE id = :i AND hospital_id = :h"), {"i": footer_id, "h": hospital_id}).mappings().first()
+    if not row:
+        raise HTTPException(404, "Footer not found.")
+    return dict(row)
+
+
+@router.get("/footers")
+def list_footers(db: Session = Depends(get_db), user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id)):
+    return {
+        "footers": [_footer_serialize(r) for r in svc.list_footers(db, hospital_id)],
+        "modules": [{"id": m, "label": l} for m, l in svc.WATERMARK_MODULES],
+    }
+
+
+@router.post("/footers")
+async def create_footer(
+    request: Request,
+    name: str = Form(...),
+    footer_text: str = Form(""),
+    modules: str = Form(""),
+    file: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")),
+    hospital_id: int = Depends(current_hospital_id),
+):
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(name or "")).strip()
+    if not name or len(name) > 100:
+        raise HTTPException(400, "Give the footer a name (up to 100 characters).")
+    text_val = str(footer_text or "").strip()
+    if len(text_val) > 500:
+        raise HTTPException(400, "Footer text must be 500 characters or fewer.")
+    if isinstance(modules, str):
+        mods = [m.strip() for m in re.split(r"[,\s]+", modules) if m.strip()]
+    else:
+        mods = list(modules or [])
+
+    blob = None
+    mime = None
+    w = None
+    h = None
+    if file and file.filename:
+        data = await file.read(svc.MAX_UPLOAD_BYTES + 1)
+        if data:
+            try:
+                blob, mime, w, h = svc.process_asset(data, file.filename or "")
+            except svc.BrandingError as exc:
+                raise HTTPException(400, str(exc))
+
+    footer_id = db.execute(
+        text("""INSERT INTO document_footers (hospital_id, name, footer_text, image_mime, width_px, height_px, modules, created_by)
+                VALUES (:h, :n, :t, :m, :w, :ht, :mods, :u) RETURNING id"""),
+        {"h": hospital_id, "n": name, "t": text_val, "m": mime, "w": w, "ht": h, "mods": mods, "u": user.get("username")},
+    ).scalar()
+
+    if blob and mime:
+        rel = svc.save_footer_entry(hospital_id, footer_id, blob, mime)
+        db.execute(text("UPDATE document_footers SET image_path = :p WHERE id = :i"), {"p": rel, "i": footer_id})
+
+    log_audit_event(db, user, client_ip(request), "create", "footer", str(footer_id), {"name": name, "modules": mods})
+    db.commit()
+    svc.invalidate_footers(hospital_id)
+    return await _footer_response(db, hospital_id)
+
+
+@router.put("/footers/{footer_id}")
+async def update_footer(
+    footer_id: int, request: Request, payload: dict = Body(...), db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_footer(db, hospital_id, footer_id)
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(payload.get("name", row["name"]))).strip()
+    if not name or len(name) > 100:
+        raise HTTPException(400, "Give the footer a name (up to 100 characters).")
+    text_val = str(payload.get("footer_text", row.get("footer_text") or "")).strip()
+    if len(text_val) > 500:
+        raise HTTPException(400, "Footer text must be 500 characters or fewer.")
+    raw_mods = payload.get("modules", row["modules"])
+    if isinstance(raw_mods, str):
+        mods = [m.strip() for m in re.split(r"[,\s]+", raw_mods) if m.strip()]
+    else:
+        mods = list(raw_mods or [])
+    active = bool(payload.get("active", row.get("active", True)))
+    db.execute(
+        text("""UPDATE document_footers SET name = :n, footer_text = :t, modules = :mods, active = :a, updated_at = NOW() WHERE id = :i"""),
+        {"n": name, "t": text_val, "mods": mods, "a": active, "i": footer_id},
+    )
+    log_audit_event(db, user, client_ip(request), "update", "footer", str(footer_id), {"name": name, "modules": mods, "active": active})
+    db.commit()
+    svc.invalidate_footers(hospital_id)
+    return await _footer_response(db, hospital_id)
+
+
+@router.post("/footers/{footer_id}/image")
+async def replace_footer_image(
+    footer_id: int, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_footer(db, hospital_id, footer_id)
+    data = await file.read(svc.MAX_UPLOAD_BYTES + 1)
+    try:
+        blob, mime, w, h = svc.process_asset(data, file.filename or "")
+    except svc.BrandingError as exc:
+        raise HTTPException(400, str(exc))
+    rel = svc.save_footer_entry(hospital_id, footer_id, blob, mime)
+    db.execute(text("UPDATE document_footers SET image_path = :p, image_mime = :m, width_px = :w, height_px = :h, updated_at = NOW() WHERE id = :i"),
+               {"p": rel, "m": mime, "w": w, "h": h, "i": footer_id})
+    log_audit_event(db, user, client_ip(request), "replace_image", "footer", str(footer_id), {})
+    db.commit()
+    if row.get("image_path"):
+        svc.remove_asset(row.get("image_path"))
+    svc.invalidate_footers(hospital_id)
+    return await _footer_response(db, hospital_id)
+
+
+@router.delete("/footers/{footer_id}/image")
+async def remove_footer_image(
+    footer_id: int, request: Request, db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_footer(db, hospital_id, footer_id)
+    db.execute(text("UPDATE document_footers SET image_path = NULL, image_mime = NULL, width_px = NULL, height_px = NULL, updated_at = NOW() WHERE id = :i"),
+               {"i": footer_id})
+    log_audit_event(db, user, client_ip(request), "remove_image", "footer", str(footer_id), {})
+    db.commit()
+    if row.get("image_path"):
+        svc.remove_asset(row.get("image_path"))
+    svc.invalidate_footers(hospital_id)
+    return await _footer_response(db, hospital_id)
+
+
+@router.delete("/footers/{footer_id}")
+async def delete_footer(
+    footer_id: int, request: Request, db: Session = Depends(get_db),
+    user: dict = Depends(require_permissions("admin.use")), hospital_id: int = Depends(current_hospital_id),
+):
+    row = _get_footer(db, hospital_id, footer_id)
+    db.execute(text("DELETE FROM document_footers WHERE id = :i"), {"i": footer_id})
+    log_audit_event(db, user, client_ip(request), "delete", "footer", str(footer_id), {"name": row["name"]})
+    db.commit()
+    if row.get("image_path"):
+        svc.remove_asset(row.get("image_path"))
+    svc.invalidate_footers(hospital_id)
+    return await _footer_response(db, hospital_id)
+
+
+@router.get("/footer-asset/{footer_id}")
+def get_footer_asset(footer_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user), hospital_id: int = Depends(current_hospital_id)):
+    row = _get_footer(db, hospital_id, footer_id)
+    path = svc.abs_path(row.get("image_path"))
+    if not path or not os.path.exists(path):
         raise HTTPException(404, "Not found")
     with open(path, "rb") as f:
         body = f.read()

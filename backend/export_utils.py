@@ -218,12 +218,20 @@ def draw_pdf_brand_footer(pdf):
     pdf.line(15, 280.2, 99.0, 280.2)
     pdf.line(111.0, 280.2, 195.0, 280.2)
 
+    assigned_footer = branding.get_footer()
     module_logos = branding.get_logos_for_module() or []
     primary_logo = module_logos[0] if module_logos else None
-    logo_path = (b.get("footer_file") if b else None) or (primary_logo.get("file") if primary_logo else None) or (b.get("logo_file") if b else None) or _footer_logo_path()
-    if logo_path:
+    logo_path = (assigned_footer.get("file") if assigned_footer else None) or \
+                (b.get("footer_file") if b else None) or \
+                (primary_logo.get("file") if primary_logo else None) or \
+                (b.get("logo_file") if b else None) or \
+                _footer_logo_path()
+    if logo_path and os.path.exists(logo_path):
         try:
-            if b and b.get("footer_file") and b.get("footer_file") == logo_path:
+            if assigned_footer and assigned_footer.get("file") == logo_path:
+                src_w = assigned_footer.get("width_px") or 0
+                src_h = assigned_footer.get("height_px") or 0
+            elif b and b.get("footer_file") and b.get("footer_file") == logo_path:
                 src_w = b.get("footer_width_px") or 0
                 src_h = b.get("footer_height_px") or 0
             elif primary_logo and primary_logo.get("file") == logo_path:
@@ -246,7 +254,8 @@ def draw_pdf_brand_footer(pdf):
         except Exception:
             pass
     text_y = -13.8
-    custom_text = _latin(b["footer_text"]) if b and b.get("footer_text") else ""
+    footer_text_val = (assigned_footer.get("footer_text") if assigned_footer else None) or (b.get("footer_text") if b else "")
+    custom_text = _latin(footer_text_val.strip()) if footer_text_val else ""
     default_text = f"Thank you for choosing {brand_title().rstrip('. ')}."
     pdf.set_y(text_y)
     pdf.set_font("Helvetica", "I", 7.5)

@@ -4,7 +4,7 @@ import { filenameFromContentDisposition } from "./exportShare";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import { PRINT_BRAND_HEADER_DATA_URI } from "./printBrand";
-import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveWatermark, getBranding, getDocumentCategory } from "./branding";
+import { brandSystemLabel, brandThanks, brandTitle, escapeBrandText, fitMm, getActiveFooter, getActiveLogos, getActiveWatermark, getBranding, getDocumentCategory } from "./branding";
 
 export type StandardPdfSection = {
   title: string;
@@ -294,10 +294,11 @@ export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: bo
     pdf.line(15 * MM, lineY, 99 * MM, lineY);
     pdf.line(111 * MM, lineY, 195 * MM, lineY);
     const brand = getBranding();
+    const activeFooter = getActiveFooter(getDocumentCategory() || "reports");
     try {
       const activeLogos = getActiveLogos(getDocumentCategory() || "reports");
       const primaryLogo = activeLogos[0] || null;
-      const footerAsset = brand?.footer?.data_uri ? brand.footer : brand?.logo?.data_uri ? brand.logo : primaryLogo;
+      const footerAsset = (activeFooter?.data_uri ? activeFooter : null) || (brand?.footer?.data_uri ? brand.footer : (brand?.logo?.data_uri ? brand.logo : primaryLogo));
       if (footerAsset?.data_uri) {
         const [fw, fh] = fitMm(footerAsset.width_px, footerAsset.height_px, 10, 8, true);
         pdf.addImage(footerAsset.data_uri, "PNG", (105 - fw / 2) * MM, lineY - (fh / 2) * MM, fw * MM, fh * MM, "brand-footer-image", "FAST");
@@ -312,7 +313,8 @@ export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: bo
     pdf.setTextColor(0, 0, 0);
     // Baseline matches the backend footer text (cell top 283.2mm, 5mm tall).
     const textY = (pageHeightMm - 10.4) * MM;
-    const footerLines = pdf.splitTextToSize(brand?.footer_text || brandThanks(), 125 * MM) as string[];
+    const footerText = activeFooter?.footer_text || brand?.footer_text || brandThanks();
+    const footerLines = pdf.splitTextToSize(footerText, 125 * MM) as string[];
     pdf.text(footerLines[0] || "", 15 * MM, textY);
     pdf.text(`Page ${page} of ${total}`, 195 * MM, textY, { align: "right" });
   }
