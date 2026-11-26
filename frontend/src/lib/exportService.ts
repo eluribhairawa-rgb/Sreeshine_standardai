@@ -295,7 +295,9 @@ export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: bo
     pdf.line(111 * MM, lineY, 195 * MM, lineY);
     const brand = getBranding();
     try {
-      const footerAsset = brand?.footer?.data_uri ? brand.footer : brand?.logo?.data_uri ? brand.logo : null;
+      const activeLogos = getActiveLogos(getDocumentCategory() || "reports");
+      const primaryLogo = activeLogos[0] || null;
+      const footerAsset = brand?.footer?.data_uri ? brand.footer : brand?.logo?.data_uri ? brand.logo : primaryLogo;
       if (footerAsset?.data_uri) {
         const [fw, fh] = fitMm(footerAsset.width_px, footerAsset.height_px, 10, 8, true);
         pdf.addImage(footerAsset.data_uri, "PNG", (105 - fw / 2) * MM, lineY - (fh / 2) * MM, fw * MM, fh * MM, "brand-footer-image", "FAST");
@@ -351,7 +353,17 @@ export async function generateClientPdf(
         <div style="margin-bottom: ${PDF_HEADER_SPACING}; padding-top: 8px;">
           ${(() => {
             const b = getBranding();
-            if (!b || (!b.logo?.data_uri && !b.hospital_title)) {
+            const activeLogos = getActiveLogos(getDocumentCategory() || "reports");
+            const primaryLogo = activeLogos[0] || null;
+            const logoDataUri = b?.logo?.data_uri || primaryLogo?.data_uri || null;
+            const logoWidthPx = b?.logo?.width_px || primaryLogo?.width_px || null;
+            const logoHeightPx = b?.logo?.height_px || primaryLogo?.height_px || null;
+            const logoAlignment = primaryLogo?.alignment || b?.logo_alignment || "left";
+            const logoOffsetX = primaryLogo?.offset_x_mm ?? b?.logo_offset_x_mm ?? 0;
+            const logoOffsetY = primaryLogo?.offset_y_mm ?? b?.logo_offset_y_mm ?? 0;
+            const logoAutoFit = primaryLogo ? primaryLogo.auto_fit_scaling : (b?.auto_fit_scaling ?? true);
+
+            if (!b || (!logoDataUri && !b.hospital_title)) {
               return `<div style="display: flex; justify-content: flex-start; align-items: center; padding: 6px 0;">
                 <img src="${PRINT_BRAND_HEADER_DATA_URI}" style="width: ${PDF_LOGO_WIDTH}; height: ${PDF_LOGO_HEIGHT}; object-fit: contain;" alt="HospAI Logo" />
               </div>`;
@@ -368,28 +380,28 @@ export async function generateClientPdf(
               : `<div style="font-size: ${fontPx}px; font-weight: 800; color: #000; text-transform: uppercase; line-height: 1.25;">${escapeBrandText(titleText)}</div>`;
             const titleContainer = `<div style="flex: 1; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;">${titleContent}</div>`;
 
-            if (!b.logo?.data_uri) {
+            if (!logoDataUri) {
               return `<div style="text-align: center; width: 100%; padding: 6px 0;">${titleContent}</div>`;
             }
 
-            const [w, h] = fitMm(b.logo.width_px, b.logo.height_px, b.logo_box_mm[0], b.logo_box_mm[1], b.auto_fit_scaling);
+            const [w, h] = fitMm(logoWidthPx, logoHeightPx, b.logo_box_mm[0], b.logo_box_mm[1], logoAutoFit);
             const px = (mm: number) => Math.round(mm * 3.7795 * 1.6);
-            const safeOffsetY = Math.max(b.logo_offset_y_mm ?? 0, -2.5);
-            const logoImg = `<img src="${b.logo.data_uri}" style="width: ${px(w)}px; height: ${px(h)}px; object-fit: contain; position: relative; left: ${px(b.logo_offset_x_mm ?? 0)}px; top: ${px(safeOffsetY)}px;" alt="${escapeBrandText(titleText || "Logo")}" />`;
+            const safeOffsetY = Math.max(logoOffsetY, -2.5);
+            const logoImg = `<img src="${logoDataUri}" style="width: ${px(w)}px; height: ${px(h)}px; object-fit: contain; position: relative; left: ${px(logoOffsetX)}px; top: ${px(safeOffsetY)}px;" alt="${escapeBrandText(titleText || "Logo")}" />`;
 
             if (!titleText) {
-              const justify = b.logo_alignment === "center" ? "center" : b.logo_alignment === "right" ? "flex-end" : "flex-start";
+              const justify = logoAlignment === "center" ? "center" : logoAlignment === "right" ? "flex-end" : "flex-start";
               return `<div style="display: flex; justify-content: ${justify}; align-items: center; padding: 6px 0;">${logoImg}</div>`;
             }
 
-            if (b.logo_alignment === "center") {
+            if (logoAlignment === "center") {
               return `<div style="display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 6px 0;">
                 <div>${logoImg}</div>
                 ${titleContainer}
               </div>`;
             }
 
-            if (b.logo_alignment === "right") {
+            if (logoAlignment === "right") {
               return `<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0;">
                 <div style="width: ${px(w)}px; flex-shrink: 0; visibility: hidden;"></div>
                 ${titleContainer}

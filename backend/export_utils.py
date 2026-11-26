@@ -79,22 +79,55 @@ def draw_pdf_brand_header(pdf, left_margin: float, top_y: float, title_width: fl
     """Draw the letterhead used by every PDF export: the hospital's custom logo/title
     when configured in Branding & Templates, otherwise the approved HospAI logo."""
     b = _brand()
-    drawn = None
-    if b and b.get("logo_file"):
-        try:
-            import branding
-            align = b.get("logo_alignment") or "left"
-            right_edge = 195
-            bw, bh = branding.LOGO_BOX_MM
+    import branding
+    module_logos = branding.get_logos_for_module() or []
+    bw, bh = branding.LOGO_BOX_MM
+    right_edge = 195
 
-            def x_for(w):
-                base = {"left": left_margin, "center": (left_margin + right_edge - w) / 2, "right": right_edge - w}.get(align, left_margin)
-                return min(max(base + b["logo_offset_x_mm"], 0), 210 - w)
-            y = min(max(top_y + b["logo_offset_y_mm"], 3), top_y + 33 - 4)
-            drawn = _custom_image(pdf, b["logo_file"], b.get("logo_mime"), b.get("logo_width_px"), b.get("logo_height_px"),
-                                  bw, bh, bool(b.get("auto_fit_scaling")), x_for, y)
-        except Exception:
-            drawn = None
+    logos_to_draw = []
+    if module_logos:
+        logos_to_draw = module_logos
+    elif b and b.get("logo_file"):
+        logos_to_draw = [{
+            "file": b["logo_file"],
+            "mime": b.get("logo_mime"),
+            "width_px": b.get("logo_width_px"),
+            "height_px": b.get("logo_height_px"),
+            "alignment": b.get("logo_alignment") or "left",
+            "offset_x_mm": float(b.get("logo_offset_x_mm") or 0),
+            "offset_y_mm": float(b.get("logo_offset_y_mm") or 0),
+            "auto_fit_scaling": bool(b.get("auto_fit_scaling")),
+        }]
+
+    drawn_left = None
+    drawn_right = None
+    drawn_center = None
+
+    for logo in logos_to_draw:
+        file_path = logo.get("file")
+        if not file_path or not os.path.exists(file_path):
+            continue
+        align = logo.get("alignment") or "left"
+        off_x = float(logo.get("offset_x_mm") or 0)
+        off_y = float(logo.get("offset_y_mm") or 0)
+
+        def x_for(w, _align=align, _off_x=off_x):
+            base = {"left": left_margin, "center": (left_margin + right_edge - w) / 2, "right": right_edge - w}.get(_align, left_margin)
+            return min(max(base + _off_x, 0), 210 - w)
+
+        y = min(max(top_y + off_y, 3), top_y + 33 - 4)
+        drawn_info = _custom_image(pdf, file_path, logo.get("mime"), logo.get("width_px"), logo.get("height_px"),
+                                   bw, bh, bool(logo.get("auto_fit_scaling", True)), x_for, y)
+        if drawn_info:
+            if align == "right" and not drawn_right:
+                drawn_right = drawn_info
+            elif align == "center" and not drawn_center:
+                drawn_center = drawn_info
+            elif not drawn_left:
+                drawn_left = drawn_info
+
+    drawn = drawn_left or drawn_right or drawn_center
+
     title = (brand_title() if b and b.get("hospital_title") else "").strip()
     if title:
         raw_lines = [l.strip() for l in title.replace("\\n", "\n").splitlines() if l.strip()]
@@ -104,22 +137,24 @@ def draw_pdf_brand_header(pdf, left_margin: float, top_y: float, title_width: fl
             18 if max_line_len <= 20 else (15.5 if max_line_len <= 32 else (13.5 if max_line_len <= 48 else (11.5 if max_line_len <= 65 else 9.5)))
         )
         pdf.set_text_color(0, 0, 0)
-        align = (b.get("logo_alignment") if b else None) or "left"
 
-        if drawn:
-            x, w, h = drawn
-            if align == "left":
-                text_x = left_margin + w + 3
-                text_w = 195 - text_x
-                start_y = max(top_y + (h - (len(raw_lines) * 6)) / 2, top_y + 4) if len(raw_lines) > 1 else top_y + (h - 10) / 2
-            elif align == "right":
-                text_x = left_margin
-                text_w = x - left_margin - 3
-                start_y = max(top_y + (h - (len(raw_lines) * 6)) / 2, top_y + 4) if len(raw_lines) > 1 else top_y + (h - 10) / 2
-            else:  # center
-                text_x = left_margin
-                text_w = 195 - left_margin
-                start_y = top_y + h + 2
+        if drawn_center:
+            text_x = left_margin
+            text_w = 195 - left_margin
+            start_y = top_y + drawn_center[2] + 2
+        elif drawn_left and drawn_right:
+            text_x = left_margin + drawn_left[1] + 3
+            text_w = max(drawn_right[0] - 3 - text_x, 30)
+            h_ref = max(drawn_left[2], drawn_right[2])
+            start_y = max(top_y + (h_ref - (len(raw_lines) * 6)) / 2, top_y + 4) if len(raw_lines) > 1 else top_y + (h_ref - 10) / 2
+        elif drawn_left:
+            text_x = left_margin + drawn_left[1] + 3
+            text_w = 195 - text_x
+            start_y = max(top_y + (drawn_left[2] - (len(raw_lines) * 6)) / 2, top_y + 4) if len(raw_lines) > 1 else top_y + (drawn_left[2] - 10) / 2
+        elif drawn_right:
+            text_x = left_margin
+            text_w = max(drawn_right[0] - left_margin - 3, 30)
+            start_y = max(top_y + (drawn_right[2] - (len(raw_lines) * 6)) / 2, top_y + 4) if len(raw_lines) > 1 else top_y + (drawn_right[2] - 10) / 2
         else:
             text_x = left_margin
             text_w = 195 - left_margin
@@ -132,7 +167,7 @@ def draw_pdf_brand_header(pdf, left_margin: float, top_y: float, title_width: fl
             pdf.set_font("Helvetica", "B" if i == 0 else "", sub_font)
             pdf.cell(text_w, line_h, _latin(line), align="C")
     elif not drawn:
-        logo_path = None if (b and b.get("hospital_title") and not b.get("logo_file")) else _frontend_logo_path()
+        logo_path = None if (b and b.get("hospital_title") and not (b.get("logo_file") or logos_to_draw)) else _frontend_logo_path()
         if logo_path:
             try:
                 pdf.image(logo_path, x=left_margin, y=top_y, w=0, h=28)
@@ -177,20 +212,26 @@ def draw_pdf_brand_footer(pdf):
     the current page, honouring a custom footer image/text from Branding & Templates.
     Call from FPDF.footer(); needs pdf.alias_nb_pages()."""
     b = _brand()
+    import branding
     pdf.set_draw_color(0, 0, 0)
     pdf.set_line_width(0.45)
     pdf.line(15, 280.2, 99.0, 280.2)
     pdf.line(111.0, 280.2, 195.0, 280.2)
 
-    logo_path = (b.get("footer_file") if b else None) or (b.get("logo_file") if b else None) or _footer_logo_path()
+    module_logos = branding.get_logos_for_module() or []
+    primary_logo = module_logos[0] if module_logos else None
+    logo_path = (b.get("footer_file") if b else None) or (primary_logo.get("file") if primary_logo else None) or (b.get("logo_file") if b else None) or _footer_logo_path()
     if logo_path:
         try:
-            # Fit into the 10x8mm centre slot (aspect kept) and centre on the page (x=105, y=rule line)
-            # so wide custom footer images can't spill over the rules or the text.
-            import branding
-            if b and (b.get("footer_file") or b.get("logo_file")) and (b.get("footer_file") or b.get("logo_file")) == logo_path:
-                src_w = (b.get("footer_width_px") if b.get("footer_file") else b.get("logo_width_px")) or 0
-                src_h = (b.get("footer_height_px") if b.get("footer_file") else b.get("logo_height_px")) or 0
+            if b and b.get("footer_file") and b.get("footer_file") == logo_path:
+                src_w = b.get("footer_width_px") or 0
+                src_h = b.get("footer_height_px") or 0
+            elif primary_logo and primary_logo.get("file") == logo_path:
+                src_w = primary_logo.get("width_px") or 0
+                src_h = primary_logo.get("height_px") or 0
+            elif b and b.get("logo_file") and b.get("logo_file") == logo_path:
+                src_w = b.get("logo_width_px") or 0
+                src_h = b.get("logo_height_px") or 0
             else:
                 src_w = src_h = 0
             if not (src_w and src_h):
@@ -738,14 +779,22 @@ def _generate_word(patient_name, doc_type, ocr_text, date_str=None) -> bytes:
     b = _brand()
     align_map = {"left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER, "right": WD_ALIGN_PARAGRAPH.RIGHT}
     logo_done = False
-    if b and b.get("logo_file") and (b.get("logo_mime") == "image/png"):  # python-docx cannot embed SVG
+    import branding
+    module_logos = branding.get_logos_for_module() or []
+    primary_logo = module_logos[0] if module_logos else None
+    logo_file = (primary_logo.get("file") if primary_logo else None) or (b.get("logo_file") if b else None)
+    logo_mime = (primary_logo.get("mime") if primary_logo else None) or (b.get("logo_mime") if b else None)
+    logo_w_px = (primary_logo.get("width_px") if primary_logo else None) or (b.get("logo_width_px") if b else None)
+    logo_h_px = (primary_logo.get("height_px") if primary_logo else None) or (b.get("logo_height_px") if b else None)
+    logo_align = (primary_logo.get("alignment") if primary_logo else None) or (b.get("logo_alignment") if b else None) or "left"
+    logo_autofit = (primary_logo.get("auto_fit_scaling") if primary_logo else None) if primary_logo else (b.get("auto_fit_scaling") if b else True)
+    if logo_file and (logo_mime == "image/png"):  # python-docx cannot embed SVG
         try:
-            import branding
             from docx.shared import Mm
-            w, _h = branding.fit_mm(b.get("logo_width_px"), b.get("logo_height_px"), *branding.LOGO_BOX_MM, bool(b.get("auto_fit_scaling")))
+            w, _h = branding.fit_mm(logo_w_px, logo_h_px, *branding.LOGO_BOX_MM, bool(logo_autofit))
             logo_par = doc.add_paragraph()
-            logo_par.alignment = align_map.get(b.get("logo_alignment") or "left", WD_ALIGN_PARAGRAPH.LEFT)
-            logo_par.add_run().add_picture(b["logo_file"], width=Mm(w))
+            logo_par.alignment = align_map.get(logo_align, WD_ALIGN_PARAGRAPH.LEFT)
+            logo_par.add_run().add_picture(logo_file, width=Mm(w))
             logo_done = True
         except Exception:
             logo_done = False

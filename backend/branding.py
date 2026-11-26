@@ -245,12 +245,36 @@ WATERMARK_MODULES = [
 WATERMARK_MODULE_IDS = {m for m, _ in WATERMARK_MODULES}
 WATERMARK_MAX_BYTES = 5 * 1024 * 1024
 
+MODULE_ALIASES = {
+    "dashboard": "reports",
+    "analytics": "reports",
+    "patient-registration": "op",
+    "queue-management": "op",
+    "consultation": "op",
+    "op-management": "op",
+    "doctor-scheduling": "op",
+    "follow-up": "op",
+    "doctors-history": "op",
+    "doctor-prescription": "prescription",
+    "bed-management": "ip",
+    "ip-management": "ip",
+    "ot": "ip",
+    "laboratory": "lab",
+    "lab-diagnostics": "lab",
+    "accounts": "billing",
+    "finance": "billing",
+    "insurance-desk": "insurance",
+    "discharge-summary": "discharge",
+}
+
 _current_module = contextvars.ContextVar("document_module", default=None)
 
 
 @contextmanager
 def use_module(module):
     """Scope `get_watermark()` (no argument) to a module while a PDF is built."""
+    if module and module in MODULE_ALIASES:
+        module = MODULE_ALIASES[module]
     token = _current_module.set(module if module in WATERMARK_MODULE_IDS else None)
     try:
         yield
@@ -317,6 +341,8 @@ def list_watermarks(db, hospital_id, active_only=False):
 def get_watermark(module=None, hospital_id=None):
     """Active watermark assigned to `module` (image file + opacity + size), or None. Never raises."""
     module = module or _current_module.get()
+    if module and module in MODULE_ALIASES:
+        module = MODULE_ALIASES[module]
     hid = hospital_id or _current_hospital.get()
     if not module or not hid:
         return None
@@ -371,6 +397,8 @@ def list_logos(db, hospital_id, active_only=False):
 def get_logos_for_module(module=None, hospital_id=None):
     """Active logos assigned to `module` (or all modules), or None. Never raises."""
     module = module or _current_module.get()
+    if module and module in MODULE_ALIASES:
+        module = MODULE_ALIASES[module]
     hid = hospital_id or _current_hospital.get()
     if not hid:
         return []

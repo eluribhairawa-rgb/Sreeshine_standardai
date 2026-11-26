@@ -296,6 +296,7 @@ export default function RoleDashboard({ user, onNavigate, onLogout, setNotice, d
       sections.push({ title: worklist.title, headers: worklist.columns, rows: worklist.rows.map((r) => r.map(formatCell)) });
     }
     return await generatePDFBlob({
+      module: "reports",
       title: `${personaLabel} Dashboard Report`,
       subtitle: `${data?.scope_label || "Personal dashboard"} · ${currentDateLabel}`,
       filename: `${persona}_dashboard`,

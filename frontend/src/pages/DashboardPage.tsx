@@ -554,6 +554,7 @@ function ExecutiveDashboard({
 
   const handleGeneratePdf = async () => {
     const payload: StandardPdfPayload = {
+      module: "reports",
       title: "Executive Dashboard Report",
       subtitle: `Hospital Performance & Revenue Summary for ${currentDateLabel}`,
       filename: "Executive_Dashboard",

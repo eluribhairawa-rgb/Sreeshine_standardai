@@ -223,8 +223,9 @@ def standard_module_report_export_pdf(payload: dict = Body(default={}), db: Sess
     Billing, Lab, Patients, Patient Journey) posts its own report here; a
     payload with no `sections` at all falls back to the hospital-operations
     overview, matching this endpoint's original GET behavior."""
+    module = (payload or {}).get("module") or "reports"
     if payload and payload.get("sections"):
-        pdf_bytes = generate_standard_report_pdf(payload, hospital_id=user.get("hospital_id"))
+        pdf_bytes = generate_standard_report_pdf(payload, hospital_id=user.get("hospital_id"), module=module)
     else:
         overview = lq.get_reports_overview(db)
         pdf_bytes = generate_pdf("Hospital Operations", "reports_overview", _build_reports_export_text(overview), datetime.now().strftime("%Y-%m-%d %H:%M"), hospital_id=user.get("hospital_id"), module="reports")
