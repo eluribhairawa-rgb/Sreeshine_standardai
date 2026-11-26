@@ -213,7 +213,7 @@ def draw_pdf_brand_footer(pdf):
     Call from FPDF.footer(); needs pdf.alias_nb_pages()."""
     b = _brand()
     import branding
-    line_y = round(pdf.h - 15.0, 1)
+    line_y = round(min(pdf.h - 15.0, 263.0), 1)
     pdf.set_draw_color(0, 0, 0)
     pdf.set_line_width(0.45)
     pdf.line(15, line_y, 99.0, line_y)
@@ -352,7 +352,7 @@ def _generate_pdf(patient_name, doc_type, ocr_text, date_str=None) -> bytes:
         return text.encode("latin-1", errors="replace").decode("latin-1")
 
     def _ensure_space(height: float):
-        if pdf.get_y() + height > pdf.h - 22:
+        if pdf.get_y() + height > min(pdf.h - 22.0, 255.0):
             pdf.add_page()
             _draw_document_header()
 
@@ -450,7 +450,7 @@ def _generate_pdf(patient_name, doc_type, ocr_text, date_str=None) -> bytes:
     document_title = _title_for_doc(doc_type)
     pdf.set_left_margin(left_margin)
     pdf.set_right_margin(right_margin)
-    pdf.set_auto_page_break(auto=True, margin=22)
+    pdf.set_auto_page_break(auto=True, margin=max(22.0, pdf.h - 255.0))
     pdf.alias_nb_pages()
     pdf.add_page()
 
@@ -585,7 +585,7 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
     right_margin = 15
     pdf.set_left_margin(left_margin)
     pdf.set_right_margin(right_margin)
-    pdf.set_auto_page_break(auto=True, margin=22)
+    pdf.set_auto_page_break(auto=True, margin=max(22.0, pdf.h - 255.0))
     pdf.alias_nb_pages()
     pdf.add_page()
 
@@ -593,7 +593,7 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
     effective_width = page_width - left_margin - right_margin
 
     def _ensure_space(height: float):
-        if pdf.get_y() + height > pdf.h - 22:
+        if pdf.get_y() + height > min(pdf.h - 22.0, 255.0):
             pdf.add_page()
             pdf.set_y(15)
 
@@ -716,7 +716,7 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
         rows = section.get("rows") or []
         approx_row_h = 4.8
         est_height = 7.5 + (5.5 if headers else 0) + (len(rows) * approx_row_h)
-        if len(rows) <= 6 and pdf.get_y() > 60 and (pdf.get_y() + est_height > pdf.h - 22):
+        if len(rows) <= 6 and pdf.get_y() > 60 and (pdf.get_y() + est_height > min(pdf.h - 22.0, 255.0)):
             pdf.add_page()
             pdf.set_y(15)
         _section(section.get("title") or "Details")
