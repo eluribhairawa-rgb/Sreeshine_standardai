@@ -1,5 +1,6 @@
 """Document Branding & Templates API (admin-managed, read by every print/PDF path)."""
 import base64
+import os
 import re
 from typing import Optional
 
@@ -582,7 +583,7 @@ def _footer_serialize(r):
     return {
         "id": r["id"],
         "name": r["name"],
-        "image_url": f"/api/branding/footer-asset/{r['id']}" if r.get("image_path") else None,
+        "image_url": f"/api/branding/footer-asset/{r['id']}?t={int(r['updated_at'].timestamp()) if r.get('updated_at') else 0}" if r.get("image_path") else None,
         "width_px": r.get("width_px"),
         "height_px": r.get("height_px"),
         "footer_text": r.get("footer_text") or "",
