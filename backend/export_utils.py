@@ -213,10 +213,11 @@ def draw_pdf_brand_footer(pdf):
     Call from FPDF.footer(); needs pdf.alias_nb_pages()."""
     b = _brand()
     import branding
+    line_y = round(pdf.h - 15.0, 1)
     pdf.set_draw_color(0, 0, 0)
     pdf.set_line_width(0.45)
-    pdf.line(15, 280.2, 99.0, 280.2)
-    pdf.line(111.0, 280.2, 195.0, 280.2)
+    pdf.line(15, line_y, 99.0, line_y)
+    pdf.line(111.0, line_y, 195.0, line_y)
 
     assigned_footer = branding.get_footer()
     module_logos = branding.get_logos_for_module() or []
@@ -250,20 +251,19 @@ def draw_pdf_brand_footer(pdf):
                 except Exception:
                     src_w, src_h = 10, 8  # e.g. SVG: fill the centre slot
             fw, fh = branding.fit_mm(src_w, src_h, 10.0, 8.0, True)
-            pdf.image(logo_path, x=105.0 - fw / 2, y=280.2 - fh / 2, w=fw, h=fh)
+            pdf.image(logo_path, x=105.0 - fw / 2, y=line_y - fh / 2, w=fw, h=fh)
         except Exception:
             pass
-    text_y = -13.8
+    text_y = line_y + 2.5
     footer_text_val = (assigned_footer.get("footer_text") if assigned_footer else None) or (b.get("footer_text") if b else "")
     custom_text = _latin(footer_text_val.strip()) if footer_text_val else ""
     default_text = f"Thank you for choosing {brand_title().rstrip('. ')}."
-    pdf.set_y(text_y)
+    pdf.set_xy(15, text_y)
     pdf.set_font("Helvetica", "I", 7.5)
     pdf.set_text_color(0, 0, 0)
-    pdf.set_x(15)
-    pdf.cell(110 if custom_text else 82, 5, custom_text or default_text, align="L")
-    pdf.set_x(155)
-    pdf.cell(40, 5, f"Page {pdf.page_no()} of {{nb}}", align="R")
+    pdf.cell(110 if custom_text else 82, 4.5, custom_text or default_text, align="L")
+    pdf.set_xy(155, text_y)
+    pdf.cell(40, 4.5, f"Page {pdf.page_no()} of {{nb}}", align="R")
 
 
 def parse_markdown_line(line):
@@ -352,7 +352,7 @@ def _generate_pdf(patient_name, doc_type, ocr_text, date_str=None) -> bytes:
         return text.encode("latin-1", errors="replace").decode("latin-1")
 
     def _ensure_space(height: float):
-        if pdf.get_y() + height > 276:
+        if pdf.get_y() + height > pdf.h - 22:
             pdf.add_page()
             _draw_document_header()
 
@@ -450,7 +450,7 @@ def _generate_pdf(patient_name, doc_type, ocr_text, date_str=None) -> bytes:
     document_title = _title_for_doc(doc_type)
     pdf.set_left_margin(left_margin)
     pdf.set_right_margin(right_margin)
-    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_auto_page_break(auto=True, margin=22)
     pdf.alias_nb_pages()
     pdf.add_page()
 
@@ -585,7 +585,7 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
     right_margin = 15
     pdf.set_left_margin(left_margin)
     pdf.set_right_margin(right_margin)
-    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_auto_page_break(auto=True, margin=22)
     pdf.alias_nb_pages()
     pdf.add_page()
 
@@ -593,18 +593,18 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
     effective_width = page_width - left_margin - right_margin
 
     def _ensure_space(height: float):
-        if pdf.get_y() + height > 276:
+        if pdf.get_y() + height > pdf.h - 22:
             pdf.add_page()
             pdf.set_y(15)
 
     def _section(title: str):
-        _ensure_space(15)
-        pdf.ln(2)
+        _ensure_space(11)
+        pdf.ln(1)
         pdf.set_fill_color(231, 247, 250)
         pdf.set_draw_color(190, 222, 233)
-        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_font("Helvetica", "B", 9.5)
         pdf.set_text_color(11, 95, 118)
-        pdf.cell(effective_width, 8, _clean(title), border=1, fill=True, ln=True)
+        pdf.cell(effective_width, 6.5, _clean(title), border=1, fill=True, ln=True)
         pdf.set_text_color(0, 0, 0)
 
     def _cell_label_value(label: str, value: str, x: float, y: float, w: float, h: float = 12):
@@ -638,51 +638,51 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
 
     _NARROW_TABLE_HEADERS = {
         "time", "date", "charge", "received", "qty", "quantity", "status",
-        "unit price", "amount", "rate", "discount",
+        "unit price", "amount", "rate", "discount", "count", "completed", "pending",
     }
 
     def _table(headers, rows):
         col_count = max(len(headers), 1)
         narrow = [h.strip().lower() in _NARROW_TABLE_HEADERS for h in headers]
-        narrow_w = min(24.0, effective_width / col_count)
+        narrow_w = min(22.0, effective_width / col_count)
         wide_count = max(sum(1 for n in narrow if not n), 1)
         remaining = effective_width - narrow_w * sum(1 for n in narrow if n)
         wide_w = remaining / wide_count
         col_widths = [narrow_w if n else wide_w for n in narrow]
 
-        _ensure_space(8)
+        _ensure_space(6.5)
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_fill_color(241, 248, 252)
         pdf.set_draw_color(215, 226, 236)
         for h, w in zip(headers, col_widths):
-            pdf.cell(w, 7, _clean(h)[:30], border=1, fill=True)
-        pdf.ln(7)
-        pdf.set_font("Helvetica", "", 8)
+            pdf.cell(w, 5.5, _clean(h)[:30], border=1, fill=True)
+        pdf.ln(5.5)
+        pdf.set_font("Helvetica", "", 7.8)
         for row in rows:
             cell_texts = [_clean(row[i] if i < len(row) else "") for i in range(col_count)]
             line_counts = [max(1, int(pdf.get_string_width(text) / max(1, col_widths[i] - 2)) + 1 + text.count('\n')) for i, text in enumerate(cell_texts)]
-            row_h = max(line_counts) * 4 + 2
+            row_h = max(line_counts) * 3.6 + 1.2
             _ensure_space(row_h)
             y = pdf.get_y()
             x = pdf.get_x()
             for i, text in enumerate(cell_texts):
                 pdf.set_xy(x, y)
-                pdf.multi_cell(col_widths[i], 4, text, border=1)
+                pdf.multi_cell(col_widths[i], 3.6, text, border=1)
                 x += col_widths[i]
             pdf.set_xy(left_margin, y + row_h)
 
-    draw_pdf_brand_header(pdf, left_margin, 8, title_width=92)
-    pdf.set_xy(left_margin, 45)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(effective_width, 6, _clean(payload.get("title") or "Hospital Report"), ln=True)
+    draw_pdf_brand_header(pdf, left_margin, 6, title_width=92)
+    pdf.set_xy(left_margin, 42)
+    pdf.set_font("Helvetica", "B", 12.5)
+    pdf.cell(effective_width, 5.5, _clean(payload.get("title") or "Hospital Report"), ln=True)
     pdf.set_x(left_margin)
     pdf.set_font("Helvetica", "", 8.5)
-    pdf.cell(effective_width, 5, _clean(payload.get("subtitle") or ""), ln=True)
+    pdf.cell(effective_width, 4.5, _clean(payload.get("subtitle") or ""), ln=True)
     generated = datetime.now().strftime("%d/%m/%Y %I:%M %p")
     pdf.set_x(left_margin)
-    pdf.set_font("Helvetica", "", 7.8)
-    pdf.cell(effective_width, 5, _clean(f"Generated: {generated}" + (f"  |  By: {payload.get('operator_name')}" if payload.get("operator_name") else "")), ln=True)
-    pdf.set_y(max(pdf.get_y() + 2, 64))
+    pdf.set_font("Helvetica", "", 7.5)
+    pdf.cell(effective_width, 4.5, _clean(f"Generated: {generated}" + (f"  |  By: {payload.get('operator_name')}" if payload.get("operator_name") else "")), ln=True)
+    pdf.set_y(max(pdf.get_y() + 1.5, 58))
 
     invoice_meta = payload.get("invoice_meta") or {}
     if invoice_meta.get("invoice_number") or invoice_meta.get("invoice_date"):
@@ -712,16 +712,21 @@ def _generate_standard_report_pdf(payload: dict) -> bytes:
         _two_column_details(rows)
 
     for section in payload.get("sections") or []:
-        _section(section.get("title") or "Details")
         headers = section.get("headers") or []
         rows = section.get("rows") or []
+        approx_row_h = 4.8
+        est_height = 7.5 + (5.5 if headers else 0) + (len(rows) * approx_row_h)
+        if len(rows) <= 6 and pdf.get_y() > 60 and (pdf.get_y() + est_height > pdf.h - 22):
+            pdf.add_page()
+            pdf.set_y(15)
+        _section(section.get("title") or "Details")
         if headers and rows:
             _table(headers, rows)
         elif not rows:
             _ensure_space(8)
-            pdf.set_font("Helvetica", "", 9)
+            pdf.set_font("Helvetica", "", 8.5)
             pdf.set_text_color(100, 116, 139)
-            pdf.cell(effective_width, 7, _clean("No data recorded for this section."), ln=True)
+            pdf.cell(effective_width, 6, _clean("No data recorded for this section."), ln=True)
             pdf.set_text_color(0, 0, 0)
 
     totals = payload.get("totals") or {}

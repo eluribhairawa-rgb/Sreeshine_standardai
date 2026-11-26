@@ -285,7 +285,7 @@ export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: bo
   const MM = 72 / 25.4 / pdf.internal.scaleFactor;
   const total = pdf.getNumberOfPages();
   const pageHeightMm = pdf.internal.pageSize.getHeight() / MM;
-  const lineY = (pageHeightMm - 16.8) * MM;
+  const lineY = (pageHeightMm - 15.0) * MM;
   for (let page = 1; page <= total; page += 1) {
     pdf.setPage(page);
     if (watermark) drawPdfWatermark(pdf, page);
@@ -311,8 +311,8 @@ export function drawPdfFooter(pdf: jsPDF, { watermark = true }: { watermark?: bo
     pdf.setFont("helvetica", "italic");
     pdf.setFontSize(7.5);
     pdf.setTextColor(0, 0, 0);
-    // Baseline matches the backend footer text (cell top 283.2mm, 5mm tall).
-    const textY = (pageHeightMm - 10.4) * MM;
+    // Baseline matches the backend footer text (line_y + 2.5mm, 4.5mm tall).
+    const textY = (pageHeightMm - 11.5) * MM;
     const footerText = activeFooter?.footer_text || brand?.footer_text || brandThanks();
     const footerLines = pdf.splitTextToSize(footerText, 125 * MM) as string[];
     pdf.text(footerLines[0] || "", 15 * MM, textY);
