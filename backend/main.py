@@ -66,6 +66,13 @@ def on_startup():
     schema_setup.ensure_schema()
     with db_session() as db:
         security.create_default_users(db)
+        try:
+            import seed_swecha_catalogue
+            import seed_swecha_parameters
+            seed_swecha_catalogue.seed_catalogue(dry_run=False, db=db, verbose=False)
+            seed_swecha_parameters.seed_parameters(dry_run=False, force=True, db=db, verbose=False)
+        except Exception as exc:
+            logger.warning(f"[startup] diagnostic catalogue seed skipped/warning: {exc}")
 
 
 # ------------------------------------------------------------ error handling --

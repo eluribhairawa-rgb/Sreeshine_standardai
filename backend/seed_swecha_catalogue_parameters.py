@@ -289,6 +289,36 @@ add(["Urine culture and senstivity", "URINE CULTURE", "Urine Culture", "Blood Cu
 add(["Histopathology Small", "BIOPSY", "SMALL BIOPSY", "FNAC (Fine needle aspiration cytology)", "PAP SMEAR (GYNEC CYTOLOGY)"],
     pack(txt("Specimen"), txt("Gross description"), txt("Microscopy"), txt("Impression")))
 add(["KARYOTYPING", "KARYOTYPING COUPLE", "NIPT"], pack(txt("Result"), txt("Interpretation")))
+# Remaining specialised tests & imaging studies (all 293 PDF tests covered)
+add("URINE COTININE", qual("Cotinine (Urine)", "Negative (< 200 ng/mL)"))
+add("OBS", pack(txt("Obstetric Observation", "Normal"), txt("Impression")))
+add("AMH (Anti Mullerian Hormone)", by_sex("AMH (Anti-Mullerian Hormone)", "ng/mL", (1.3, 14.8), (1.0, 4.0)))
+add("FREE PSA:TOTAL PSA RATIO", by_sex("Free PSA / Total PSA Ratio", "%", (25.0, None, "> 25 %"), None))
+add("MEDICAL EXAMINATION", pack(txt("Medical Examination Findings", "Normal / Fit"), txt("Remarks")))
+add("(24HOURS URINE)", pack(num("24-Hour Urine Volume", "mL/24hr", 800, 2000), num("24-Hour Urine Protein", "mg/24hr", None, 150, "< 150")))
+add("FLUID ANALYSIS", pack(txt("Appearance", "Clear, straw-coloured"), num("Total WBC Count", "cells/cumm", None, 500, "< 500"), num("Fluid Protein", "g/dL", None, 2.5), num("Fluid Glucose", "mg/dL", 60, 100)))
+add("ADA (ADENOSINE DEAMINASE)-BODY FLUID", num("Adenosine Deaminase (ADA)", "U/L", None, 40, "< 40"))
+add("ANTINATAL PROFILE", pack(by_sex("Haemoglobin", "g/dL", (13.0, 17.0), (11.5, 15.5)), txt("Blood Group & Rh"), num("Random Blood Sugar (RBS)", "mg/dL", 70, 140), num("TSH", "uIU/mL", 0.4, 4.0), qual("HIV", "Non-reactive"), qual("HBsAg", "Non-reactive"), qual("VDRL", "Non-reactive")))
+add("Surgical Profile", pack(by_sex("Haemoglobin", "g/dL", (13.0, 17.0), (12.0, 15.0)), num("Total Leucocyte Count", "cells/cumm", 4000, 11000), num("Platelet Count", "lakhs/cumm", 1.5, 4.5), num("Random Blood Sugar (RBS)", "mg/dL", 70, 140), by_sex("Serum Creatinine", "mg/dL", (0.7, 1.3), (0.6, 1.1)), num("Bleeding Time", "min", 2, 7), num("Clotting Time", "min", 4, 10), qual("HIV", "Non-reactive"), qual("HBsAg", "Non-reactive"), qual("HCV", "Non-reactive")))
+add("CREATININE (URINE SPOT TEST)", num("Urine Creatinine (Spot)", "mg/dL", 20, 275))
+add("GLUCOSE TOLERANCE TEST (GTT)", pack(num("Fasting Glucose", "mg/dL", 70, 99), num("1-Hour Glucose", "mg/dL", None, 180, "< 180"), num("2-Hour Glucose", "mg/dL", None, 140, "< 140"), qual("Urine Sugar", "Negative")))
+add("SAAG", num("Serum-Ascites Albumin Gradient (SAAG)", "g/dL", None, 1.1, "< 1.1 (non-portal); >= 1.1 (portal hypertension)"))
+add("FNSC", pack(txt("Specimen"), txt("Cytology / Fluid Findings", "No malignant cells seen"), txt("Impression")))
+add("HLA B27", qual("HLA-B27 Antigen", "Negative"))
+add("Immature Platelet Fraction (IPF)", num("Immature Platelet Fraction (IPF)", "%", 1.1, 6.1))
+add("17 - Hydroxyprogesterone ( 17-OHP)", by_sex("17-Hydroxyprogesterone (17-OHP)", "ng/mL", (0.27, 1.99), (0.15, 2.90)))
+add("Androstenedione", by_sex("Androstenedione", "ng/mL", (0.6, 3.1), (0.3, 3.3)))
+add("Dihydrotestosterone (DHT)", by_sex("Dihydrotestosterone (DHT)", "pg/mL", (250, 990), (24, 368)))
+add("PLGF (Placental Growth Factor)", num("Placental Growth Factor (PlGF)", "pg/mL", 100, None, ">= 100 (low risk)"))
+add("Progesterone", by_sex("Progesterone", "ng/mL", (0.1, 0.84), (None, None, "Follicular 0.2-1.5; Luteal 1.7-27.0; Post-menopausal < 0.8")))
+add("Protein Electrophoresis", pack(num("Albumin", "g/dL", 3.5, 5.0), num("Alpha-1 Globulin", "g/dL", 0.1, 0.3), num("Alpha-2 Globulin", "g/dL", 0.6, 1.0), num("Beta Globulin", "g/dL", 0.7, 1.2), num("Gamma Globulin", "g/dL", 0.7, 1.6)))
+add("Rh Factor (Quantity)", pack(qual("Rh (D) Typing", "Positive / Negative"), txt("Anti-D Titre", "Negative / < 1:16")))
+add("Rh Factor (Slide)", qual("Rh (D) Typing", "Positive / Negative"))
+# Imaging templates
+add("2D ECHO", pack(num("LVEF", "%", 55, 70), txt("Chamber & Valve Findings", "Normal chamber dimensions and valve function"), txt("Impression", "Normal 2D Echo study")))
+add("ECG", pack(num("Heart Rate", "bpm", 60, 100), txt("Rhythm", "Normal sinus rhythm"), txt("Impression", "Normal ECG")))
+add("NST", pack(num("Baseline Fetal Heart Rate", "bpm", 110, 160), qual("Reactivity", "Reactive"), txt("Impression", "Reactive NST")))
+add("observation", pack(txt("Observation Findings", "Stable"), txt("Impression / Notes", "Normal")))
 
 # Qualitative serology not listed above, matched by wording (antibody / antigen / screening tests).
 QUALITATIVE_RULES = [
@@ -303,25 +333,23 @@ def template_for(service):
     if key in TEMPLATES:
         return TEMPLATES[key], "template"
     if service["service_type"] == "IMAGING":
-        return None, "imaging (no result parameters)"
+        return pack(txt("Findings"), txt("Impression")), "imaging default"
     for pattern, params in QUALITATIVE_RULES:
         if pattern.search(service["name"]):
             return params, "generic qualitative rule"
     return None, "no template"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed diag_service_parameters (with M / F rows) for the catalogue tests (additive only).")
-    parser.add_argument("--dry-run", action="store_true", help="Preview only; write nothing.")
-    parser.add_argument("--force", action="store_true",
-                        help="Also add missing template parameters to services that already have parameters (never deletes or edits existing ones).")
-    args = parser.parse_args()
-
+def seed_parameters(dry_run: bool = False, force: bool = False, db=None, verbose: bool = True) -> dict:
+    """Idempotently seed diag_service_parameters (including M / F rows) without deleting or overwriting existing parameters."""
     from database import SessionLocal
     from legacy_queries import get_connection
 
-    db = SessionLocal()
-    print(f"Swecha parameter seed - {'DRY RUN (nothing is written)' if args.dry_run else 'LIVE'}{' [--force]' if args.force else ''}")
+    owns_db = db is None
+    if owns_db:
+        db = SessionLocal()
+    if verbose:
+        print(f"Swecha parameter seed - {'DRY RUN (nothing is written)' if dry_run else 'LIVE'}{' [--force]' if force else ''}")
     summary = {"services_filled": 0, "services_topped_up": 0, "params": 0, "sex_rows": 0}
     skipped_has, skipped_none, skipped_imaging, details = [], [], 0, []
     try:
@@ -339,7 +367,7 @@ def main() -> int:
                     continue
                 cursor.execute("SELECT name, sex_specific FROM diag_service_parameters WHERE service_id = ?", (svc["id"],))
                 have = {(normalise(r["name"]), r["sex_specific"] or None) for r in cursor.fetchall()}
-                if have and not args.force:
+                if have and not force:
                     skipped_has.append(svc)
                     continue
                 todo = [p for p in params if (normalise(p[0]), p[3]) not in have]
@@ -347,7 +375,7 @@ def main() -> int:
                     continue
                 cursor.execute("SELECT COALESCE(MAX(display_order), -1) AS m FROM diag_service_parameters WHERE service_id = ?", (svc["id"],))
                 order = int(cursor.fetchone()["m"]) + 1
-                if not args.dry_run:
+                if not dry_run:
                     for name, dtype, unit, sex, low, high, ref_text in todo:
                         cursor.execute(
                             """
@@ -362,36 +390,58 @@ def main() -> int:
                 summary["params"] += len(todo)
                 summary["sex_rows"] += sum(1 for p in todo if p[3])
                 details.append((svc, len(todo), sum(1 for p in todo if p[3]), source, bool(have)))
-            if args.dry_run:
+            if dry_run:
                 conn.rollback()
             else:
                 conn.commit()
     except Exception:
-        db.rollback()
+        if owns_db:
+            db.rollback()
         raise
     finally:
-        db.close()
+        if owns_db:
+            db.close()
 
-    verb = "would be added" if args.dry_run else "added"
-    print(f"\nActive services checked:            {len(services)}")
-    print(f"Services filled (had no parameters): {summary['services_filled']}")
-    if args.force:
-        print(f"Services topped up (--force):        {summary['services_topped_up']}")
-    print(f"Parameters {verb}:                  {summary['params']}  (of which Male/Female rows: {summary['sex_rows']})")
-    print(f"Skipped - already have parameters:   {len(skipped_has)}" + ("" if args.force else "  (use --force to add missing ones)"))
-    print(f"Skipped - imaging tests:             {skipped_imaging}")
-    print(f"Skipped - no template (left alone):  {len(skipped_none)}")
-    sexual = [d for d in details if d[2]]
-    if sexual:
-        print("\nTests with separate Male / Female rows:")
-        for svc, count, sex_rows, _, _ in sexual:
-            print(f"   - {svc['code']} {svc['name']}: {sex_rows} M/F rows of {count}")
-    if skipped_none:
-        print("\nNo template (enter parameters in Test Catalogue if they need them):")
-        for svc in skipped_none:
-            print(f"   - {svc['code']} {svc['name']}")
-    if args.dry_run:
-        print("\nDry run only - re-run without --dry-run to insert.")
+    if verbose:
+        verb = "would be added" if dry_run else "added"
+        print(f"\nActive services checked:            {len(services)}")
+        print(f"Services filled (had no parameters): {summary['services_filled']}")
+        if force:
+            print(f"Services topped up (--force):        {summary['services_topped_up']}")
+        print(f"Parameters {verb}:                  {summary['params']}  (of which Male/Female rows: {summary['sex_rows']})")
+        print(f"Skipped - already have parameters:   {len(skipped_has)}" + ("" if force else "  (use --force to add missing ones)"))
+        print(f"Skipped - imaging tests:             {skipped_imaging}")
+        print(f"Skipped - no template (left alone):  {len(skipped_none)}")
+        sexual = [d for d in details if d[2]]
+        if sexual:
+            print("\nTests with separate Male / Female rows:")
+            for svc, count, sex_rows, _, _ in sexual:
+                print(f"   - {svc['code']} {svc['name']}: {sex_rows} M/F rows of {count}")
+        if skipped_none:
+            print("\nNo template (enter parameters in Test Catalogue if they need them):")
+            for svc in skipped_none:
+                print(f"   - {svc['code']} {svc['name']}")
+        if dry_run:
+            print("\nDry run only - re-run without --dry-run to insert.")
+
+    return {
+        "active_services": len(services),
+        "services_filled": summary["services_filled"],
+        "services_topped_up": summary["services_topped_up"],
+        "params_added": summary["params"],
+        "sex_rows_added": summary["sex_rows"],
+        "skipped_has": len(skipped_has),
+        "skipped_none": len(skipped_none),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Seed diag_service_parameters (with M / F rows) for the catalogue tests (additive only).")
+    parser.add_argument("--dry-run", action="store_true", help="Preview only; write nothing.")
+    parser.add_argument("--force", action="store_true",
+                        help="Also add missing template parameters to services that already have parameters (never deletes or edits existing ones).")
+    args = parser.parse_args()
+    seed_parameters(dry_run=args.dry_run, force=args.force, verbose=True)
     return 0
 
 

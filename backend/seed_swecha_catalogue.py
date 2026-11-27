@@ -240,33 +240,32 @@ def build_catalogue():
     return services
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed the diagnostic catalogue from the Swecha rate list (additive only).")
-    parser.add_argument("--dry-run", action="store_true", help="Preview what would be inserted; write nothing.")
-    parser.add_argument("--fill-existing-params", action="store_true",
-                        help="Also add the standard parameters to tests that already exist in the catalogue but have none "
-                             "(off by default: existing services are never touched).")
-    args = parser.parse_args()
-
-    # Imported here so --help works without a database.
+def seed_catalogue(dry_run: bool = False, fill_existing_params: bool = False, db=None, verbose: bool = True) -> dict:
+    """Idempotently seed all 293 tests (SW-001..SW-293) into diag_services without deleting or overwriting existing records."""
     from database import SessionLocal
     from legacy_queries import get_connection
 
     catalogue = build_catalogue()
-    db = SessionLocal()
-    mode = "DRY RUN (nothing is written)" if args.dry_run else "LIVE"
-    print(f"Swecha catalogue seed - {mode}")
+    owns_db = db is None
+    if owns_db:
+        db = SessionLocal()
+    if verbose:
+        mode = "DRY RUN (nothing is written)" if dry_run else "LIVE"
+        print(f"Swecha catalogue seed - {mode}")
     try:
         with get_connection(db) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, code, name FROM diag_services")
-            by_code, by_name = {}, {}
-            seeded_here = {}   # normalised name -> code inserted earlier in this same run
+            cursor.execute("SELECT id, code, name, service_type, department, specimen_type, modality, rate FROM diag_services")
+            by_code, by_non_sw_name = {}, {}
+            existing_rows = {}
             for row in cursor.fetchall():
-                by_code[row["code"]] = row["id"]
-                by_name.setdefault(normalise(row["name"]), row["id"])
+                rdict = dict(row)
+                existing_rows[rdict["id"]] = rdict
+                by_code[rdict["code"]] = rdict["id"]
+                if not str(rdict.get("code") or "").startswith("SW-"):
+                    by_non_sw_name.setdefault(normalise(rdict["name"]), rdict["id"])
 
-            inserted, skipped_code, skipped_name = [], [], []
+            inserted, updated, skipped = [], [], []
             params_new = params_existing = 0
             params_for_existing = []   # (service name, count)
             for svc in catalogue:
@@ -274,12 +273,12 @@ def main() -> int:
                 reason = None
                 if svc["code"] in by_code:
                     existing_id, reason = by_code[svc["code"]], "code already exists"
-                elif svc["norm"] in by_name:
-                    existing_id, reason = by_name[svc["norm"]], "a service with this name already exists"
+                elif svc["norm"] in by_non_sw_name:
+                    existing_id, reason = by_non_sw_name[svc["norm"]], "a non-SW service with this name already exists"
 
                 if existing_id is None:
                     service_id = None
-                    if not args.dry_run:
+                    if not dry_run:
                         cursor.execute(
                             """
                             INSERT INTO diag_services (
@@ -295,20 +294,39 @@ def main() -> int:
                             "INSERT INTO diag_service_pricing_history (service_id, rate, payer_type, changed_by) VALUES (?, ?, 'standard', ?)",
                             (service_id, svc["rate"], SEED_USER),
                         )
-                    # Later rows in this same run see it, so a repeated test name in the PDF is not inserted twice.
                     by_code[svc["code"]] = service_id or -svc["sno"]
-                    by_name.setdefault(svc["norm"], service_id or -svc["sno"])
-                    seeded_here.setdefault(svc["norm"], svc["code"])
                     inserted.append(svc)
                     has_params = False
                 else:
-                    if svc["norm"] in seeded_here and reason != "code already exists":
-                        reason = f"repeated test name in the PDF (same as {seeded_here[svc['norm']]})"
-                    (skipped_code if reason == "code already exists" else skipped_name).append((svc, reason, existing_id))
+                    # Only fill missing/blank fields; never overwrite existing non-empty values.
+                    cur_row = existing_rows.get(existing_id) or {}
+                    updates, params_u = [], []
+                    if not cur_row.get("service_type") and svc["service_type"]:
+                        updates.append("service_type = ?")
+                        params_u.append(svc["service_type"])
+                    if not cur_row.get("department") and svc["department"]:
+                        updates.append("department = ?")
+                        params_u.append(svc["department"])
+                    if not cur_row.get("specimen_type") and svc["specimen_type"]:
+                        updates.append("specimen_type = ?")
+                        params_u.append(svc["specimen_type"])
+                    if not cur_row.get("modality") and svc["modality"]:
+                        updates.append("modality = ?")
+                        params_u.append(svc["modality"])
+                    if (cur_row.get("rate") is None or float(cur_row.get("rate") or 0) == 0.0) and float(svc["rate"] or 0) > 0:
+                        updates.append("rate = ?")
+                        params_u.append(svc["rate"])
+                    if updates:
+                        if not dry_run:
+                            params_u.append(existing_id)
+                            cursor.execute(f"UPDATE diag_services SET {', '.join(updates)} WHERE id = ?", tuple(params_u))
+                        updated.append((svc, updates, existing_id))
+                    else:
+                        skipped.append((svc, reason, existing_id))
                     service_id = existing_id
                     has_params = None
-                    if not args.fill_existing_params:
-                        continue   # existing services are left completely untouched
+                    if not fill_existing_params:
+                        continue   # existing services' parameters are handled by seed_swecha_parameters.py
 
                 panel = PANELS.get(svc["norm"])
                 if not panel:
@@ -318,7 +336,7 @@ def main() -> int:
                     has_params = int(cursor.fetchone()["c"] or 0) > 0
                 if has_params:
                     continue
-                if not args.dry_run and service_id:
+                if not dry_run and service_id:
                     for order, (pname, dtype, unit, low, high, ref_text) in enumerate(panel):
                         cursor.execute(
                             """
@@ -334,33 +352,52 @@ def main() -> int:
                     params_existing += len(panel)
                     params_for_existing.append((svc["name"], len(panel)))
 
-            if args.dry_run:
+            if dry_run:
                 conn.rollback()
             else:
                 conn.commit()
     except Exception:
-        db.rollback()
+        if owns_db:
+            db.rollback()
         raise
     finally:
-        db.close()
+        if owns_db:
+            db.close()
 
-    verb = "would be inserted" if args.dry_run else "inserted"
-    skipped = len(skipped_code) + len(skipped_name)
-    print(f"\nTests in the PDF:         {len(catalogue)}")
-    print(f"Tests {verb}:  {len(inserted)}  (IMAGING {sum(1 for s in inserted if s['service_type'] == 'IMAGING')}, "
-          f"LAB {sum(1 for s in inserted if s['service_type'] == 'LAB')})")
-    print(f"Tests skipped (exist):    {skipped}")
-    for svc, reason, existing_id in skipped_code + skipped_name:
-        print(f"   - {svc['code']} {svc['name']!r}: {reason}" + (f" (service id {existing_id})" if existing_id and existing_id > 0 else ""))
-    print(f"Parameters {verb} for new tests:      {params_new}")
-    if args.fill_existing_params:
-        print(f"Parameters {verb} for existing tests: {params_existing} (only tests that had none)")
-    else:
-        print("Existing tests: not touched (use --fill-existing-params to add standard parameters to existing tests that have none)")
-    for name, count in params_for_existing:
-        print(f"   - {name}: {count}")
-    if args.dry_run:
-        print("\nDry run only - re-run without --dry-run to insert.")
+    if verbose:
+        verb = "would be inserted" if dry_run else "inserted"
+        upd_verb = "would be updated (missing fields)" if dry_run else "updated (missing fields)"
+        print(f"\nTests in the PDF:         {len(catalogue)}")
+        print(f"Tests {verb}:  {len(inserted)}  (IMAGING {sum(1 for s in inserted if s['service_type'] == 'IMAGING')}, "
+              f"LAB {sum(1 for s in inserted if s['service_type'] == 'LAB')})")
+        print(f"Tests {upd_verb}: {len(updated)}")
+        print(f"Tests skipped (exist):    {len(skipped)}")
+        print(f"Parameters {verb} for new tests:      {params_new}")
+        if fill_existing_params:
+            print(f"Parameters {verb} for existing tests: {params_existing} (only tests that had none)")
+        for name, count in params_for_existing:
+            print(f"   - {name}: {count}")
+        if dry_run:
+            print("\nDry run only - re-run without --dry-run to insert.")
+
+    return {
+        "total_pdf": len(catalogue),
+        "inserted": len(inserted),
+        "updated": len(updated),
+        "skipped": len(skipped),
+        "params_new": params_new,
+        "params_existing": params_existing,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Seed the diagnostic catalogue from the Swecha rate list (additive only).")
+    parser.add_argument("--dry-run", action="store_true", help="Preview what would be inserted; write nothing.")
+    parser.add_argument("--fill-existing-params", action="store_true",
+                        help="Also add the standard parameters to tests that already exist in the catalogue but have none "
+                             "(off by default: existing services are never touched).")
+    args = parser.parse_args()
+    seed_catalogue(dry_run=args.dry_run, fill_existing_params=args.fill_existing_params, verbose=True)
     return 0
 
 
