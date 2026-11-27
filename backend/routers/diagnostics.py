@@ -14,10 +14,27 @@ from lab_interpretation import draft_lab_interpretation
 router = APIRouter(prefix="/api", tags=["diagnostics"])
 
 
+def _ensure_catalogue_seeded(db: Session) -> None:
+    """Restore hardcoded Swecha 293-test catalogue & parameters if tables were truncated/emptied."""
+    with lq.get_connection(db) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM diag_services WHERE code LIKE 'SW-%'")
+        sw_count = int((cur.fetchone() or {}).get("c") or 0)
+        cur.execute("SELECT COUNT(*) AS c FROM diag_service_parameters")
+        param_count = int((cur.fetchone() or {}).get("c") or 0)
+    if sw_count >= 293 and param_count > 0:
+        return
+    import seed_swecha_catalogue
+    import seed_swecha_parameters
+    seed_swecha_catalogue.seed_catalogue(dry_run=False, db=db, verbose=False)
+    seed_swecha_parameters.seed_parameters(dry_run=False, force=True, db=db, verbose=False)
+
+
 # -------------------------------------------------------------------- overview --
 
 @router.get("/diag/overview")
 def diag_overview(db: Session = Depends(get_audited_db), user: dict = Depends(require_permissions("diag.read"))):
+    _ensure_catalogue_seeded(db)
     return lq.get_diag_overview(db)
 
 
@@ -27,6 +44,7 @@ def diag_overview(db: Session = Depends(get_audited_db), user: dict = Depends(re
 def diag_services_list(service_type: Optional[str] = None, department: Optional[str] = None,
                         active_only: Optional[str] = None, q: Optional[str] = None,
                         db: Session = Depends(get_audited_db), user: dict = Depends(require_permissions("diag.read"))):
+    _ensure_catalogue_seeded(db)
     active_flag = None
     if active_only is not None:
         active_flag = active_only.lower() in ("1", "true", "yes")
