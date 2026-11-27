@@ -958,7 +958,7 @@ function App() {
       setNotice({ type: "warning", message: activeNav.deniedHint || "You do not have permission to access this module." });
       return;
     }
-    if (!isAdminRoutePath && page === "admin" && !hasPermission("admin.users.create")) {
+    if (page === "admin" && !hasPermission("admin.users.create")) {
       const fallbackPage = getDefaultPage(user);
       setPage(fallbackPage);
       if (typeof window !== "undefined") {
@@ -1308,25 +1308,6 @@ function App() {
     }
     setPatientDetailRefreshToken((prev) => prev + 1);
   };
-
-  if (isAdminRoutePath) {
-    return (
-      <div className="app-shell app-shell-single">
-        <main className="admin-route-main">
-          <Container size="full" className="admin-route-container">
-            <header className="topbar admin-route-topbar">
-              <div>
-                <h2>Admin</h2>
-                <p className="muted">Separate admin route authentication.</p>
-              </div>
-            </header>
-            <AdminPage setNotice={setNotice} />
-          </Container>
-        </main>
-        {notice && <Toast notice={notice} onClose={() => setNotice(null)} />}
-      </div>
-    );
-  }
 
   if (!authChecked) {
     if (isPlatformAdminRoute) {
